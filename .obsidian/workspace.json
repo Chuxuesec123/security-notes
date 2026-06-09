@@ -13,15 +13,30 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "git/简单使用方式.md",
+                "file": "13-其他笔记/git/简单使用方式.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
               "title": "简单使用方式"
             }
+          },
+          {
+            "id": "0bc89cad90575096",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "00-学习路线/学习规划.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "学习规划"
+            }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "vertical"
@@ -78,7 +93,8 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 207.5,
+    "collapsed": true
   },
   "right": {
     "id": "1f333a4185aa0238",
@@ -94,7 +110,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "git/简单使用方式.md",
+                "file": "00-学习路线/学习规划.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +120,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "简单使用方式 的反向链接列表"
+              "title": "学习规划 的反向链接列表"
             }
           },
           {
@@ -113,12 +129,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "git/简单使用方式.md",
+                "file": "00-学习路线/学习规划.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "简单使用方式 的出链列表"
+              "title": "学习规划 的出链列表"
             }
           },
           {
@@ -156,13 +172,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "git/简单使用方式.md",
+                "file": "00-学习路线/学习规划.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "简单使用方式 的大纲"
+              "title": "学习规划 的大纲"
             }
           }
         ]
@@ -184,15 +200,24 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "fc1e8b78d9b13677",
+  "active": "0bc89cad90575096",
   "lastOpenFiles": [
-    "git/简单使用方式.md",
-    "git",
-    "note",
-    "新建文件夹",
-    "security-notes/note/1asd",
-    "security-notes/note",
-    "security-notes/asd",
-    "security-notes"
+    "00-学习路线/月度目标.md",
+    "00-学习路线/学习规划.md",
+    "00-学习路线/年度目标.md",
+    "00-学习路线/学习地图.md",
+    "未命名.md",
+    "模板.md",
+    "13-其他笔记/git/简单使用方式.md",
+    "13-其他笔记",
+    "12-资源收藏",
+    "11-踩坑记录",
+    "10-面试题",
+    "09-项目实战",
+    "08-内网渗透",
+    "07-代码审计",
+    "06-漏洞复现",
+    "05-工具",
+    "04-靶场"
   ]
 }
